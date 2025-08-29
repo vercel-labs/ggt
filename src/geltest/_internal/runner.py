@@ -598,6 +598,7 @@ class OutputFormat(enum.Enum):
     simple = "simple"
     stacked = "stacked"
     verbose = "verbose"
+    silent = "silent"
 
 
 class BaseRenderer:
@@ -671,6 +672,18 @@ class SimpleRenderer(BaseRenderer):
             nl=False,
             file=self.stream,
         )
+
+
+class SilentRenderer(BaseRenderer):
+    def report(
+        self,
+        test: unittest.TestCase,
+        marker: Markers,
+        description: str | None = None,
+        *,
+        currently_running: Sequence[unittest.TestCase],
+    ) -> None:
+        pass
 
 
 class VerboseRenderer(BaseRenderer):
@@ -1004,6 +1017,8 @@ class ParallelTextTestResult(unittest.result.TestResult):
             and os.name != "nt"
         ):
             self.ren = MultiLineRenderer(tests=tests, stream=stream)
+        elif output_format is OutputFormat.silent:
+            self.ren = SilentRenderer(tests=tests, stream=stream)
         else:
             self.ren = SimpleRenderer(tests=tests, stream=stream)
 
