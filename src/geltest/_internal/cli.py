@@ -27,7 +27,6 @@ import pathlib
 import shutil
 import sys
 import tempfile
-import unittest
 
 import click
 
@@ -65,6 +64,20 @@ __all__ = (
     "xerror",
     "xfail",
 )
+
+
+def _parse_key_value(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: tuple[str, ...],
+) -> dict[str, str]:
+    result = {}
+    for item in value:
+        if "=" not in item:
+            raise click.BadParameter(f"Expected format key=value, got: {item}")
+        key, val = item.split("=", 1)
+        result[key] = val
+    return result
 
 
 @click.argument("files", nargs=-1, metavar="[file or directory]...")
@@ -164,21 +177,16 @@ __all__ = (
     "--list", "list_tests", is_flag=True, help="list all the tests and exit"
 )
 @click.option(
-    "--backend-dsn",
+    "-X",
+    "--option",
     type=str,
-    help="use the specified backend cluster instead of starting a "
-    "temporary local one.",
-)
-@click.option(
-    "--use-db-cache",
-    is_flag=True,
-    help="attempt to use a cache of the test databases (unsound!)",
-)
-@click.option("--data-dir", type=str, help="use a specified data dir")
-@click.option(
-    "--use-data-dir-dbs",
-    is_flag=True,
-    help="attempt to use setup databases in the data-dir",
+    multiple=True,
+    callback=_parse_key_value,
+    help=(
+        "test suite specific option in key=value format, "
+        "e.g `test-db-cache=on` or `data-dir=/some/path`, "
+        "be specified multiple times"
+    ),
 )
 def test(
     *,
@@ -198,12 +206,9 @@ def test(
     repeat: int,
     running_times_log_file: TextIO | None,
     list_tests: bool,
-    backend_dsn: str | None,
-    use_db_cache: bool,
-    data_dir: str | None,
-    use_data_dir_dbs: bool,
     result_log: str,
     include_unsuccessful: bool,
+    option: dict[str, str],
 ) -> None:
     """Run Gel test suite.
 
@@ -283,12 +288,9 @@ def test(
             total_shards=total_shards,
             running_times_log_file=running_times_log_file,
             list_tests=list_tests,
-            backend_dsn=backend_dsn,
-            try_cached_db=use_db_cache,
-            data_dir=data_dir,
-            use_data_dir_dbs=use_data_dir_dbs,
             result_log=result_log,
             include_unsuccessful=include_unsuccessful,
+            options=option,
         )
 
     if cov:
@@ -391,15 +393,10 @@ def _run(
     total_shards: int,
     running_times_log_file: TextIO | None,
     list_tests: bool,
-    backend_dsn: str | None,
-    try_cached_db: bool,
-    data_dir: str | None,
-    use_data_dir_dbs: bool,
     result_log: str,
     include_unsuccessful: bool,
+    options: dict[str, str],
 ) -> int:
-    suite = unittest.TestSuite()
-
     total = 0
     total_unfiltered = 0
 
@@ -425,27 +422,19 @@ def _run(
         unsuccessful = results.read_unsuccessful(result_log)
         include = list(include) + unsuccessful + ["a_non_existing_test"]
 
-    test_loader = loader.TestLoader(
-        verbosity=verbosity,
-        exclude=exclude,
-        include=include,
-        progress_cb=update_progress,
-    )
-
     for file in files:
         if not os.path.exists(file) and verbosity > 0:
             click.echo(
                 styles.warning(f"Warning: {file}: no such file or directory.")
             )
 
-        if os.path.isdir(file):
-            tests = test_loader.discover(file)
-        else:
-            tests = test_loader.discover(
-                os.path.dirname(file), pattern=os.path.basename(file)
-            )
-
-        suite.addTest(tests)
+    suite = loader.discover(
+        files,
+        verbosity=verbosity,
+        include=include,
+        exclude=exclude,
+        progress_cb=update_progress,
+    )
 
     if list_tests:
         click.echo(err=True)
@@ -476,10 +465,7 @@ def _run(
             num_workers=jobs,
             failfast=failfast,
             shuffle=shuffle,
-            backend_dsn=backend_dsn,
-            try_cached_db=try_cached_db,
-            data_dir=data_dir,
-            use_data_dir_dbs=use_data_dir_dbs,
+            options=options,
         )
 
         result = test_runner.run(

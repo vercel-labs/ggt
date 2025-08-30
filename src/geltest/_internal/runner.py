@@ -39,17 +39,12 @@ import enum
 import faulthandler
 import io
 import itertools
-import json
 import multiprocessing
-import multiprocessing.reduction
 import os
-import pathlib
 import random
 import re
 import shutil
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -59,7 +54,6 @@ import unittest.signals
 import warnings
 
 import click
-
 
 from . import cov
 from . import cpython_state
@@ -100,32 +94,6 @@ def teardown_suite() -> None:
     suite = StreamingTestSuite()
     suite._tearDownPreviousClass(None, result)  # type: ignore[attr-defined]
     suite._handleModuleTearDown(result)  # type: ignore[attr-defined]
-
-
-def _populate_gel_instance_env(
-    instance: loader.Instance,
-    backend_dsn: str | None,
-) -> None:
-    server_addr = instance.get_connect_args()
-    server_addr_data = json.dumps(server_addr)
-    for key in ("EDGEDB_TEST_CLUSTER_ADDR", "GEL_TEST_INSTANCE_ADDR"):
-        os.environ[key] = server_addr_data
-
-    server_ver = str(instance.get_server_version())
-    for key in ("EDGEDB_TEST_SERVER_VERSION", "GEL_TEST_SERVER_VERSION"):
-        os.environ[key] = server_ver
-
-    if backend_dsn is not None:
-        for key in ("EDGEDB_TEST_BACKEND_DSN", "GEL_TEST_BACKEND_DSN"):
-            os.environ[key] = backend_dsn
-
-    has_create_db = instance.has_create_database()
-    for key in ("EDGEDB_TEST_CASES_SET_UP", "GEL_TEST_CASES_SET_UP"):
-        os.environ[key] = "skip" if has_create_db else "inplace"
-
-    has_create_role = str(instance.has_create_role())
-    for key in ("EDGEDB_TEST_HAS_CREATE_ROLE", "GEL_TEST_HAS_CREATE_ROLE"):
-        os.environ[key] = has_create_role
 
 
 def init_worker(
@@ -204,10 +172,15 @@ class StreamingTestSuite(unittest.TestSuite):
         result._testRunEntered = True  # type: ignore [union-attr]
         self._tearDownPreviousClass(test, result)  # type: ignore [attr-defined]
         self._handleModuleFixture(test, result)  # type: ignore [attr-defined]
+        previousClass = getattr(result, "_previousTestClass", None)
+        currentClass = test.__class__
+        if previousClass != currentClass:
+            fixtures.import_global_fixture_data()
+            fixtures.import_class_fixture_data(currentClass)
         self._handleClassSetUp(test, result)  # type: ignore [attr-defined]
-        result._previousTestClass = test.__class__  # type: ignore [union-attr]
+        result._previousTestClass = currentClass  # type: ignore [union-attr]
 
-        if getattr(test.__class__, "_classSetupFailed", False) or getattr(
+        if getattr(currentClass, "_classSetupFailed", False) or getattr(
             result, "_moduleSetUpFailed", False
         ):
             return result
@@ -239,16 +212,20 @@ def _unroll_suite(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
             yield test
 
 
-def _run_test(
-    workload: unittest.TestSuite | unittest.TestCase,
-) -> None:
+def _unroll_suites(
+    tests: Iterable[unittest.TestSuite | unittest.TestCase],
+) -> Iterator[unittest.TestCase]:
+    for test in tests:
+        if isinstance(test, unittest.TestSuite):
+            yield from _unroll_suite(test)
+        else:
+            yield test
+
+
+def _run_test(test: unittest.TestCase) -> None:
     suite = StreamingTestSuite()
     assert result is not None
-    if isinstance(workload, unittest.TestSuite):
-        for test in _unroll_suite(workload):
-            suite.run(test, result)
-    else:
-        suite.run(workload, result)
+    suite.run(test, result)
 
 
 def _is_exc_info(args: Any) -> TypeGuard[results.ExcInfo]:
@@ -256,6 +233,7 @@ def _is_exc_info(args: Any) -> TypeGuard[results.ExcInfo]:
         isinstance(args, tuple)
         and len(args) == 3
         and issubclass(args[0], BaseException)
+        and (args[2] is None or isinstance(args[2], types.TracebackType))
     )
 
 
@@ -312,6 +290,21 @@ class ChannelingTestResultMeta(type):
             **kwargs: Any,
         ) -> None:
             try:
+                new_args: list[Any] = []
+                for arg in args:
+                    if isinstance(arg, unittest.TestCase):
+                        new_args.append(loader.TestCasePickleWrapper(arg))
+                    elif _is_exc_info(arg):
+                        test = (
+                            args[0]
+                            if isinstance(args[0], unittest.TestCase)
+                            else None
+                        )
+                        formatted = results.exc_info_to_string(self, arg, test)
+                        new_args.append(formatted)
+                    else:
+                        new_args.append(arg)
+                args = tuple(new_args)
                 self._queue.put((meth, args, kwargs))
             except Exception:
                 raise
@@ -430,7 +423,7 @@ class ParallelTestSuite(unittest.TestSuite):
         backend_dsn: str | None = None,
         worker_init: Callable[[], None] | None = None,
     ) -> None:
-        self.tests = tests
+        self.tests = [*_unroll_suites(tests)]
         self.server_conn_args = server_conn_args
         self.server_ver = server_ver
         self.backend_dsn = backend_dsn
@@ -497,14 +490,18 @@ class ParallelTestSuite(unittest.TestSuite):
             for is_repeat in (False, True):
                 if self.stop_requested:
                     break
-                ar = pool.map_async(
-                    _run_test,
-                    filter(
-                        lambda t: ("test_zREPEAT" in str(t)) == is_repeat,
-                        self.tests,
-                    ),
-                    chunksize=1,
-                )
+
+                items = [
+                    loader.TestCasePickleWrapper(test)
+                    for test in (
+                        filter(
+                            lambda t: ("test_zREPEAT" in str(t)) == is_repeat,
+                            self.tests,
+                        )
+                    )
+                ]
+
+                ar = pool.map_async(_run_test, items, chunksize=1)  # type: ignore [arg-type]
 
                 while True:
                     try:
@@ -557,7 +554,7 @@ class SequentialTestSuite(unittest.TestSuite):
         *,
         worker_init: Callable[[], None] | None,
     ) -> None:
-        self.tests = tests
+        self.tests = _unroll_suites(tests)
         self.stop_requested = False
         self.worker_init = worker_init
 
@@ -1209,10 +1206,7 @@ class ParallelTextTestRunner:
         warnings: bool = True,
         failfast: bool = False,
         shuffle: bool = False,
-        backend_dsn: str | None = None,
-        data_dir: str | None = None,
-        try_cached_db: bool = False,
-        use_data_dir_dbs: bool = False,
+        options: Mapping[str, str] | None = None,
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
         self.num_workers = num_workers
@@ -1221,10 +1215,8 @@ class ParallelTextTestRunner:
         self.failfast = failfast
         self.shuffle = shuffle
         self.output_format = output_format
-        self.backend_dsn = backend_dsn
-        self.data_dir = data_dir
-        self.use_data_dir_dbs = use_data_dir_dbs
-        self.try_cached_db = try_cached_db
+        self.ui = styles.ClickUI(verbosity=verbosity, stream=self.stream)
+        self.options = {**options} if options is not None else {}
 
     def run(
         self,
@@ -1249,126 +1241,33 @@ class ParallelTextTestRunner:
             self.verbosity,
             stats,
         )
-        setup = fixtures.get_test_cases_setup(list(cases.keys()))
         worker_init = None
         bootstrap_time_taken = 0.0
         tests_time_taken = 0.0
         result: ParallelTextTestResult | None = None
-        cluster: loader.Instance | None = None
-        tempdir = None
-        setup_stats = []
+        setup_stats: fixtures.Stats = []
+        teardown_stats = []
 
         try:
-            if setup:
-                if self.verbosity >= 1:
-                    self._echo(
-                        "Populating test databases... ",
-                        fg="white",
-                        nl=False,
-                    )
-
-                if self.verbosity > 1:
-                    self._echo(
-                        "\n -> Bootstrapping Gel instance...",
-                        fg="white",
-                        nl=False,
-                    )
-
-                test_case, _, _ = next(iter(setup))
-
-                data_dir = self.data_dir
-                cluster = test_case.make_test_instance(
-                    backend_dsn=self.backend_dsn,
-                    cleanup_atexit=False,
-                    data_dir=data_dir,
+            setup_stats, fixture_data = asyncio.run(
+                fixtures.setup_test_cases(
+                    [*cases],
+                    num_jobs=self.num_workers,
+                    ui=self.ui,
+                    options=self.options,
                 )
+            )
+            bootstrap_time_taken = time.monotonic() - session_start
 
-                async def _setup() -> fixtures.Stats:
-                    cache_info = test_case.get_cache_info(cluster)
-                    cache_path = None
-                    if cache_info is not None:
-                        fname = f"{cache_info[1]}-test-dbs.tar"
-                        cache_path = cache_info[0] / fname
+            class_data: dict[str, Mapping[str, object]] = {}
+            for testcls in cases:
+                if issubclass(testcls, loader.DatabaseTestCaseProto):
+                    key = f"{testcls.__module__}.{testcls.__qualname__}"
+                    class_data[key] = testcls.get_shared_data()
 
-                    if (
-                        self.try_cached_db
-                        and cache_path is not None
-                        and cache_path.is_file()
-                    ):
-                        if self.verbosity >= 1:
-                            self._echo(
-                                f"(using DB cache from {cache_path}) ",
-                                fg="white",
-                                nl=False,
-                            )
-
-                        data_dir = tempfile.mkdtemp(prefix="edb-test-c-")
-
-                        # We shell out to tar with subprocess instead of using
-                        # tarfile because it is quite a bit faster.
-                        subprocess.check_call(
-                            ("tar", "xf", cache_path, "--strip-components=1"),
-                            cwd=data_dir,
-                        )
-
-                        cluster.set_data_dir(pathlib.Path(data_dir))
-
-                    await cluster.start()
-
-                    if self.verbosity > 1:
-                        self._echo(" OK")
-
-                    conn = cluster.get_connect_args()
-
-                    if not cluster.has_create_database():
-                        return []
-
-                    if not cluster.has_create_role():
-                        for case in cases:
-                            case.is_superuser = False  # type: ignore [attr-defined]
-
-                    stats = await fixtures.setup_test_cases(
-                        cases,
-                        cluster,
-                        num_jobs=self.num_workers,
-                        verbose=self.verbosity > 1,
-                        try_cached_db=(
-                            self.try_cached_db or self.use_data_dir_dbs
-                        ),
-                    )
-                    if self.try_cached_db and any(
-                        not x[1].get("cached", False) for x in stats
-                    ):
-                        # We stop the cluster before making a cache of
-                        # the data directory. This isn't strictly
-                        # necessary, but it speeds up startup when
-                        # restoring a cached directory, since postgres
-                        # needs to go through recovery if the shutdown
-                        # wasn't clean.
-                        cluster.stop()
-                        if self.verbosity > 1 and cache_path is not None:
-                            self._echo(
-                                f"\n -> Writing DB cache to {cache_path} ...",
-                                fg="white",
-                                nl=False,
-                            )
-                        if cache_path is not None:
-                            subprocess.check_output(
-                                ("tar", "cf", cache_path, "."),
-                                cwd=cluster.get_data_dir(),
-                                stderr=subprocess.STDOUT,
-                            )
-                        await cluster.start(port=conn["port"])
-
-                    return stats
-
-                setup_stats = asyncio.run(_setup())
-                bootstrap_time_taken = time.monotonic() - session_start
-
-                if self.verbosity >= 1:
-                    self._echo("OK")
-
-                _populate_gel_instance_env(cluster, self.backend_dsn)
+            os.environ["GEL_TEST_SETUP_RESPONSIBLE"] = "runner"
+            fixtures.export_global_fixture_data(fixture_data)
+            fixtures.export_class_fixture_data(class_data)
 
             start = time.monotonic()
 
@@ -1403,11 +1302,22 @@ class ParallelTextTestRunner:
             )
             unittest.signals.registerResult(result)
 
-            self._echo()
+            self.ui.info("\nRunning tests\n\n")
             suite.run(result)
+            self.ui.info("\n")
+
+            teardown_stats = asyncio.run(
+                fixtures.tear_down_test_cases(
+                    [*cases],
+                    num_jobs=self.num_workers,
+                    ui=self.ui,
+                )
+            )
 
             if running_times_log_file:
-                for test_obj, stat in result.test_stats + setup_stats:
+                for test_obj, stat in (
+                    result.test_stats + setup_stats + teardown_stats
+                ):
                     name = str(test_obj)
                     t = stat["running-time"]
                     at, c = stats.get(name, (0, 0))
@@ -1417,6 +1327,7 @@ class ParallelTextTestRunner:
                 writer = csv.writer(running_times_log_file)
                 for k, v in stats.items():
                     writer.writerow((k, *v))
+
             tests_time_taken = time.monotonic() - start
 
         except KeyboardInterrupt:
@@ -1425,19 +1336,6 @@ class ParallelTextTestRunner:
         finally:
             if self.verbosity == 1:
                 self._echo()
-
-            if tempdir is not None:
-                tempdir.cleanup()
-
-            if setup and cluster is not None:
-                test_case, _, _ = next(iter(setup))
-                self._echo()
-                self._echo("Shutting down test cluster... ", nl=False)
-                test_case.shutdown_test_instance(
-                    cluster,
-                    destroy=self.data_dir is None,
-                )
-                self._echo("OK.")
 
         return results.collect_result_data(
             result, bootstrap_time_taken, tests_time_taken
@@ -1486,17 +1384,3 @@ class ParallelTextTestRunner:
             random.shuffle(test_list)
 
         return test_list
-
-
-# Disable pickling of traceback objects in multiprocessing.
-# Test errors' tracebacks are serialized manually by
-# `TestReesult._exc_info_to_string()`.  Therefore we need
-# to make sure that some random __traceback__ attribute
-# doesn't crash the test results queue.
-multiprocessing.reduction.ForkingPickler.register(
-    types.TracebackType, lambda o: (_restore_Traceback, ())
-)
-
-
-def _restore_Traceback() -> None:
-    return None

@@ -4,15 +4,19 @@ from typing_extensions import TypeAliasType, TypedDict
 from typing import Required
 
 import asyncio
+import functools
+import inspect
+import json
+import os
+import sys
 import time
-import unittest
-
-import gel
+import traceback
 
 from . import loader
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    import unittest
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 
 StatsEntry = TypedDict(
@@ -25,68 +29,203 @@ StatsEntry = TypedDict(
 Stats = TypeAliasType("Stats", list[tuple[str, StatsEntry]])
 
 
-def _quote_ident(string: str) -> str:
-    return "`" + string.replace("`", "``") + "`"
-
-
-def get_test_cases_setup(
-    cases: Iterable[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
-) -> list[tuple[type[loader.DatabaseTestCaseProto], str, str]]:
-    result: list[tuple[type[loader.DatabaseTestCaseProto], str, str]] = []
-
-    for case in cases:
-        if issubclass(case, loader.DatabaseTestCaseProto):
-            try:
-                setup_script = case.get_setup_script()
-            except unittest.SkipTest:
-                continue
-
-            dbname = case.get_database_name()
-            result.append((case, dbname, setup_script))
-
-    return result
-
-
-class _DBSetup(Protocol):
+class _PhaseCallback(Protocol):
     @staticmethod
     async def __call__(
         *,
-        instance: loader.Instance,
-        test_case: loader.DatabaseTestCaseProto,
-        dbname: str,
-        setup_script: str,
+        test_case: type[loader.DatabaseTestCaseProto],
         stats: Stats,
-        try_cached_db: bool,
+        options: Mapping[str, str] | None = None,
+        ui: loader.UI,
     ) -> None: ...
 
 
 async def setup_test_cases(
-    cases: Iterable[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
-    instance: loader.Instance,
+    cases: Sequence[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
     *,
+    options: Mapping[str, str] | None = None,
     num_jobs: int = 1,
-    try_cached_db: bool = False,
-    skip_empty_databases: bool = False,
-    verbose: bool = False,
+    ui: loader.UI,
+) -> tuple[Stats, dict[str, object]]:
+    fixture_data: dict[str, object] = {}
+    fixtures: list[loader.Fixture] = []
+
+    ui.info("Setting up global test prerequisites... ")
+    for case, attr, fixture in _collect_global_fixtures(cases):
+        if options is not None:
+            fixture.set_options(options)
+        await fixture.set_up(ui)
+        data = fixture.get_shared_data()
+        if data is not None:
+            key = f"{case.__module__}.{case.__qualname__}:{attr}"
+            fixture_data[key] = data
+            fixtures.append(fixture)
+
+    ui.info("\nSetting up test classes ")
+    stats = await _call_session_phase(
+        callback=_setup_test_case,
+        cases=cases,
+        num_jobs=num_jobs,
+        options=options,
+        ui=ui,
+    )
+
+    for fixture in fixtures:
+        await fixture.post_session_set_up(cases, ui=ui)
+
+    return stats, fixture_data
+
+
+async def tear_down_test_cases(
+    cases: Sequence[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+    *,
+    options: Mapping[str, str] | None = None,
+    num_jobs: int = 1,
+    ui: loader.UI,
 ) -> Stats:
-    setup = get_test_cases_setup(cases)
+    stats = []
+
+    ui.info("Tearing down test classes ")
+    try:
+        stats.extend(
+            await _call_session_phase(
+                callback=_tear_down_test_case,
+                cases=cases,
+                num_jobs=num_jobs,
+                options=options,
+                ui=ui,
+            )
+        )
+    except Exception:
+        err = traceback.format_exc()
+        ui.warning(f"exception in test class teardown:\n{err}\n")
+
+    ui.info("Tearing down global test prerequisites... ")
+    try:
+        for _, _, fixture in _collect_global_fixtures(cases):
+            await fixture.tear_down(ui)
+    except Exception:
+        err = traceback.format_exc()
+        ui.warning(f"exception in test fixture teardown:\n{err}\n")
+
+    return stats
+
+
+@functools.cache
+def _find_all_global_fixture_data() -> dict[tuple[str, str, str], str]:
+    result: dict[tuple[str, str, str], str] = {}
+
+    for env_var, serialized_data in os.environ.items():
+        _, pfx, key = env_var.partition("GEL_TEST_GLOBAL_DATA_")
+        if not pfx:
+            # Not a global fixture data entry
+            continue
+
+        clsfqname, sep, attr = key.partition(":")
+        if not sep:
+            # Improperly formatted key?
+            # XXX: log a warning
+            continue
+
+        modname, dot, clsname = clsfqname.rpartition(".")
+        if not dot:
+            # Improperly formatted key?
+            # XXX: log a warning
+            continue
+
+        result[modname, clsname, attr] = serialized_data
+
+    return result
+
+
+def import_global_fixture_data() -> None:
+    fixture_data = _find_all_global_fixture_data()
+    for (modname, clsname, attr), serialized_data in fixture_data.items():
+        if (
+            # the module containing the class was imported
+            (mod := sys.modules.get(modname)) is not None
+            # and the class is actually in that module
+            and (cls := getattr(mod, clsname, None)) is not None
+            # and the attribute is a fixture
+            and isinstance(
+                (fixture := inspect.getattr_static(cls, attr, None)),
+                loader.Fixture,
+            )
+        ):
+            try:
+                data = json.loads(serialized_data)
+            except ValueError:
+                # XXX: log a warning
+                pass
+            else:
+                fixture.set_shared_data(data)
+
+
+def import_class_fixture_data(cls: type[unittest.TestCase]) -> None:
+    if not issubclass(cls, loader.DatabaseTestCaseProto):
+        return
+    cls_key = f"{cls.__module__}.{cls.__qualname__}"
+    env_key = f"GEL_TEST_CLASS_DATA_{cls_key}"
+    data_string = os.environ.get(env_key, "")
+    if data_string:
+        class_data = json.loads(data_string)
+        if not isinstance(class_data, dict):
+            raise RuntimeError(f"expected data in {env_key} to be a dict")
+        cls.update_shared_data(**class_data)
+
+
+def export_global_fixture_data(
+    global_fixture_data: Mapping[str, object],
+) -> None:
+    for key, data in global_fixture_data.items():
+        os.environ[f"GEL_TEST_GLOBAL_DATA_{key}"] = json.dumps(data)
+
+
+def export_class_fixture_data(
+    class_fixture_data: Mapping[str, Mapping[str, object]],
+) -> None:
+    for key, data in class_fixture_data.items():
+        os.environ[f"GEL_TEST_CLASS_DATA_{key}"] = json.dumps(data)
+
+
+def _collect_global_fixtures(
+    cases: Iterable[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+) -> Iterator[
+    tuple[
+        type[unittest.TestCase | loader.DatabaseTestCaseProto],
+        str,
+        loader.Fixture,
+    ]
+]:
+    seen: set[loader.Fixture] = set()
+    for case in cases:
+        for name in dir(case):
+            attr = inspect.getattr_static(case, name, None)
+            if isinstance(attr, loader.Fixture) and attr not in seen:
+                seen.add(attr)
+                origin = next(c for c in case.__mro__ if name in c.__dict__)
+                yield origin, name, attr
+
+
+async def _call_session_phase(
+    *,
+    callback: _PhaseCallback,
+    cases: Iterable[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+    num_jobs: int = 1,
+    options: Mapping[str, str] | None = None,
+    ui: loader.UI,
+) -> Stats:
+    eligible = [
+        case
+        for case in cases
+        if issubclass(case, loader.DatabaseTestCaseProto)
+    ]
 
     stats: Stats = []
     if num_jobs == 1:
         # Special case for --jobs=1
-        for case, dbname, setup_script in setup:
-            if skip_empty_databases and not setup_script:
-                continue
-            await _setup_database(
-                instance=instance,
-                test_case=case,
-                dbname=dbname,
-                setup_script=setup_script,
-                stats=stats,
-                try_cached_db=try_cached_db,
-            )
-            if verbose:
-                pass
+        for case in eligible:
+            await callback(test_case=case, stats=stats, options=options, ui=ui)
     else:
         async with asyncio.TaskGroup() as g:
             # Use a semaphore to limit the concurrency of bootstrap
@@ -96,103 +235,52 @@ async def setup_test_cases(
             sem = asyncio.BoundedSemaphore(num_jobs)
 
             async def controller(
-                coro: _DBSetup,
-                *,
-                instance: loader.Instance,
-                dbname: str,
-                test_case: loader.DatabaseTestCaseProto,
-                setup_script: str,
-                stats: Stats,
-                try_cached_db: bool,
+                cb: _PhaseCallback,
+                test_case: type[loader.DatabaseTestCaseProto],
             ) -> None:
                 async with sem:
-                    await coro(
-                        instance=instance,
-                        dbname=dbname,
+                    await cb(
                         test_case=test_case,
-                        setup_script=setup_script,
                         stats=stats,
-                        try_cached_db=try_cached_db,
+                        options=options,
+                        ui=ui,
                     )
-                    if verbose:
-                        pass
 
-            for case, dbname, setup_script in setup:
-                if skip_empty_databases and not setup_script:
-                    continue
+            for case in eligible:
+                g.create_task(controller(callback, case))
 
-                g.create_task(
-                    controller(
-                        _setup_database,
-                        instance=instance,
-                        dbname=dbname,
-                        test_case=case,
-                        setup_script=setup_script,
-                        stats=stats,
-                        try_cached_db=try_cached_db,
-                    )
-                )
+    ui.text("\n")
+
     return stats
 
 
-async def _setup_database(
+async def _setup_test_case(
     *,
-    instance: loader.Instance,
-    test_case: loader.DatabaseTestCaseProto,
-    dbname: str,
-    setup_script: str,
+    test_case: type[loader.DatabaseTestCaseProto],
     stats: Stats,
-    try_cached_db: bool,
+    options: Mapping[str, str] | None = None,
+    ui: loader.UI,
 ) -> None:
     start_time = time.monotonic()
-
-    args = {**instance.get_connect_args()}
-
-    try:
-        admin_conn = test_case.make_async_test_client(
-            instance=instance, **args
-        )
-        await admin_conn.ensure_connected()
-    except Exception as ex:
-        raise RuntimeError(
-            f"exception during creation of {dbname!r} test DB; "
-            f"could not connect to test instance: {type(ex).__name__}({ex})"
-        ) from ex
-
-    try:
-        await admin_conn.execute(f"CREATE DATABASE {_quote_ident(dbname)};")
-    except gel.DuplicateDatabaseDefinitionError:
-        # Eh, that's fine
-        # And, if we are trying to use a cache of the database, assume
-        # the db is populated and return.
-        if try_cached_db:
-            elapsed = time.monotonic() - start_time
-            stats.append(
-                ("setup::" + dbname, {"running-time": elapsed, "cached": True})
-            )
-            return
-    except Exception as ex:
-        raise RuntimeError(
-            f"exception during creation of {dbname!r} test DB: "
-            f"{type(ex).__name__}({ex})"
-        ) from ex
-    finally:
-        await admin_conn.aclose()
-
-    args["database"] = dbname
-    dbconn = test_case.make_async_test_client(instance=instance, **args)
-    try:
-        if setup_script:
-            await test_case.execute_retrying(dbconn, setup_script)
-    except Exception as ex:
-        raise RuntimeError(
-            f"exception during initialization of {dbname!r} test DB: "
-            f"{type(ex).__name__}({ex})"
-        ) from ex
-    finally:
-        await dbconn.aclose()
-
+    if options is not None:
+        test_case.set_options(options)
+    await test_case.set_up_class_once(ui)
     elapsed = time.monotonic() - start_time
-    stats.append(
-        ("setup::" + dbname, {"running-time": elapsed, "cached": False})
-    )
+    clsname = f"{test_case.__module__}.{test_case.__qualname__}"
+    stats.append(("setup::" + clsname, {"running-time": elapsed}))
+    ui.text(f"\n -> {clsname}")
+
+
+async def _tear_down_test_case(
+    *,
+    test_case: type[loader.DatabaseTestCaseProto],
+    stats: Stats,
+    options: Mapping[str, str] | None = None,
+    ui: loader.UI,
+) -> None:
+    start_time = time.monotonic()
+    await test_case.tear_down_class_once(ui)
+    elapsed = time.monotonic() - start_time
+    clsname = f"{test_case.__module__}.{test_case.__qualname__}"
+    stats.append(("teardown::" + clsname, {"running-time": elapsed}))
+    ui.text(f"\n -> {clsname}")

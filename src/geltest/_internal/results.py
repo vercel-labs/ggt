@@ -43,6 +43,7 @@ import typing
 import unittest
 import glob
 import shutil
+import traceback
 import types
 
 import click
@@ -76,7 +77,6 @@ def _collect_case_data(
     test: unittest.TestCase,
     err: Any,
 ) -> TestCase:
-    import gel  # noqa: PLC0415
     from . import runner  # noqa: PLC0415
 
     py_HashSecret = None
@@ -88,11 +88,13 @@ def _collect_case_data(
             py_random_seed = binascii.hexlify(prs).decode()
 
     error_message = None
-    server_traceback = None
+    server_traceback: str | None = None
     if runner._is_exc_info(err):
-        if isinstance(err[1], gel.EdgeDBError):
-            server_traceback = err[1].get_server_context()  # type: ignore [no-untyped-call]
-        error_message = _exc_info_to_string(result, err, test)
+        if callable(get_srvctx := getattr(err[1], "get_server_context", None)):
+            srvctx = get_srvctx()
+            if isinstance(srvctx, str):
+                server_traceback = srvctx
+        error_message = exc_info_to_string(result, err, test)
     elif isinstance(err, runner.SerializedServerError):
         error_message, server_traceback = err.test_error, err.server_error
     elif isinstance(err, str):
@@ -108,16 +110,19 @@ def _collect_case_data(
     )
 
 
-def _exc_info_to_string(
-    result: runner.ParallelTextTestResult,
+def exc_info_to_string(
+    result: unittest.TestResult,
     err: OptExcInfo,
-    test: unittest.TestCase,
+    test: unittest.TestCase | None,
 ) -> str:
     """Converts a sys.exc_info()-style tuple of values into a string."""
     if callable(eits := getattr(test, "exc_info_to_string", None)):
         return eits(result, err)  # type: ignore [no-any-return]
-    else:
+    elif test is not None:
         return unittest.TestResult._exc_info_to_string(result, err, test)  # type: ignore [attr-defined, no-any-return]
+    else:
+        lines = traceback.format_exception(err[0], value=err[1], tb=err[2])
+        return "".join(lines)
 
 
 @dataclasses.dataclass()

@@ -18,8 +18,11 @@
 
 
 from __future__ import annotations
+from typing import Any, TextIO
 from typing_extensions import TypeAliasType
 from collections.abc import Callable
+
+import sys
 
 import click
 
@@ -61,3 +64,28 @@ def status(t: str) -> str:
 
 def warning(t: str) -> str:
     return click.style(t, fg="yellow")
+
+
+class ClickUI:
+    def __init__(
+        self, verbosity: int = 1, stream: TextIO = sys.stderr
+    ) -> None:
+        self._verbosity = verbosity
+        self._stream = stream
+
+    def _echo(self, msg: str = "", **kwargs: Any) -> None:
+        if self._verbosity > 0:
+            click.secho(msg, file=self._stream, **({"nl": False} | kwargs))
+
+    def text(self, msg: str) -> None:
+        if self._verbosity > 1:
+            self._echo(msg)
+
+    def info(self, msg: str) -> None:
+        self._echo(msg, fg="white")
+
+    def warning(self, msg: str) -> None:
+        self._echo(msg, fg="yellow")
+
+    def error(self, msg: str) -> None:
+        self._echo(msg, fg="read")

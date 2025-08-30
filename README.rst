@@ -1,13 +1,14 @@
-============
+=======
 Geltest
-============
+=======
 
-**Supercharged Python Unittest Runner for Gel**
+**Supercharged Python Unittest Runner**
 
-Geltest is a powerful, parallel test runner designed specifically for Gel
-database applications. It extends Python's built-in unittest framework with
-advanced features like parallel execution, database fixture management,
-comprehensive reporting, and intelligent test sharding.
+Geltest is a powerful, parallel test runner designed for Gel database
+applications. It extends Python's built-in unittest framework with advanced
+features like parallel execution, flexible fixture management, comprehensive
+reporting, and intelligent test sharding. While optimized for Gel workflows,
+it provides a generalized architecture for complex test suite requirements.
 
 .. contents:: Table of Contents
    :local:
@@ -20,9 +21,9 @@ Features
    Run tests across multiple worker processes to dramatically reduce test
    suite execution time
 
-🗄️ **Database Management**
-   Automatic setup and teardown of test databases with caching support for
-   faster subsequent runs
+🗄️ **Flexible Fixture System**
+   Powerful session-level fixture management with automatic setup and teardown
+   of test prerequisites
 
 📊 **Rich Output Formats**
    Multiple output formats including simple dots, verbose descriptions, and a
@@ -43,6 +44,7 @@ Features
    - Expected failure decorators (``@xfail``, ``@xerror``,
      ``@not_implemented``)
    - Comprehensive warning capture and reporting
+   - Extensible option system for test suite customization
 
 Installation
 ============
@@ -174,22 +176,22 @@ Output and Reporting
    Maintain a CSV file tracking test execution times for performance
    analysis.
 
-Database and Infrastructure
----------------------------
+``-X, --option KEY=VALUE``
+   Test suite specific options in key-value format. Can be specified multiple
+   times to pass configuration options to test fixtures and test cases.
 
-``--backend-dsn TEXT``
-   Use a specific backend database cluster instead of creating a temporary
-   one.
+   Examples:
 
-``--data-dir TEXT``
-   Use a specified data directory for the test cluster.
+   .. code-block:: bash
 
-``--use-db-cache``
-   Attempt to use cached test databases (faster but potentially unsafe for
-   some test patterns).
+      # Enable database caching
+      geltest -X test-db-cache=on
 
-``--use-data-dir-dbs``
-   Use existing databases in the specified data directory.
+      # Specify custom data directory
+      geltest -X data-dir=/custom/path
+
+      # Multiple options
+      geltest -X backend-dsn=postgresql://... -X use-ssl=true
 
 Advanced Options
 ----------------
@@ -209,8 +211,11 @@ Advanced Options
    multiple times.
 
 
+Test Decorators and Fixtures
+============================
+
 Test Decorators
-===============
+---------------
 
 ``@async_timeout(seconds)``
    Set a timeout for async test methods. The test will fail if it takes
@@ -230,6 +235,91 @@ Test Decorators
 
 ``@skip(reason)``
    Skip a test entirely (from standard unittest).
+
+Fixture System
+--------------
+
+Geltest provides a powerful fixture system for managing test prerequisites
+at the session level. Fixtures are declared as class attributes and
+automatically handle setup and teardown across the entire test session.
+
+Basic Fixture Example:
+
+.. code-block:: python
+
+   class DatabaseFixture:
+       def __init__(self):
+           self._instance = None
+
+       async def set_up(self, ui):
+           """Called once during session setup"""
+           self._instance = await create_database()
+
+       async def tear_down(self, ui):
+           """Called once during session teardown"""
+           if self._instance:
+               await self._instance.close()
+
+       def __get__(self, obj, cls):
+           """Descriptor protocol - returns the fixture value"""
+           return self._instance
+
+       def set_options(self, options):
+           """Configure fixture from command-line options"""
+           if 'database-url' in options:
+               self.database_url = options['database-url']
+
+   class MyTestCase(unittest.TestCase):
+       database = DatabaseFixture()
+
+       def test_something(self):
+           # self.database is automatically available
+           result = self.database.query("SELECT 1")
+           self.assertEqual(result, 1)
+
+Fixtures support:
+
+- **Automatic lifecycle management**: ``set_up()`` and ``tear_down()`` are
+  called automatically
+- **Option integration**: ``set_options()`` receives command-line options
+  passed via ``-X``
+- **Shared data**: Fixtures can share data across processes using
+  ``get_shared_data()`` and ``set_shared_data()``
+- **Post-session setup**: ``post_session_set_up()`` is called after all
+  class setup is complete
+
+Test Case Protocol
+------------------
+
+For advanced test cases that need session-level setup and configuration,
+implement the ``DatabaseTestCaseProto`` protocol:
+
+.. code-block:: python
+
+   class MyAdvancedTestCase(unittest.TestCase, DatabaseTestCaseProto):
+       @classmethod
+       def set_options(cls, options):
+           """Receive command-line options passed via -X"""
+           cls.database_url = options.get('database-url')
+           cls.enable_cache = options.get('cache') == 'on'
+
+       @classmethod
+       async def set_up_class_once(cls, ui):
+           """Called once per test class during session setup"""
+           if cls.database_url:
+               cls.connection = await connect(cls.database_url)
+
+       @classmethod
+       async def tear_down_class_once(cls, ui):
+           """Called once per test class during session teardown"""
+           if hasattr(cls, 'connection'):
+               await cls.connection.close()
+
+The protocol methods are:
+
+- ``set_options(options)``: Receives command-line options from ``-X`` flags
+- ``set_up_class_once(ui)``: Async setup called once per test class
+- ``tear_down_class_once(ui)``: Async teardown called once per test class
 
 Output Formats
 ==============
@@ -284,18 +374,24 @@ on your CPU cores. You can override this:
    # Use single-threaded execution
    geltest -j 1
 
-Database Caching
-----------------
+Fixture Options
+---------------
 
-Enable database caching to speed up subsequent test runs:
+Pass configuration to your fixtures using the ``-X`` option:
 
 .. code-block:: bash
 
-   geltest --use-db-cache
+   # Enable caching in your fixtures
+   geltest -X test-cache=on
 
-This caches the populated test databases and reuses them across runs. Use
-with caution as it may lead to test isolation issues if tests modify
-persistent state.
+   # Pass database configuration
+   geltest -X database-url=postgresql://localhost/testdb
+
+   # Multiple configuration options
+   geltest -X cache=on -X timeout=30 -X verbose=true
+
+Your fixtures receive these options in their ``set_options()`` method and
+can use them to customize behavior.
 
 Test Sharding
 -------------
@@ -339,7 +435,8 @@ Example GitHub Actions configuration:
          - run: pip install geltest
          - run: |
              geltest -s ${{ matrix.shard }}/4 \
-               --result-log results-${{ matrix.shard }}.json
+               --result-log results-${{ matrix.shard }}.json \
+               -X test-cache=on -X timeout=300
          - uses: actions/upload-artifact@v3
            with:
              name: test-results
@@ -357,12 +454,36 @@ Generate coverage reports alongside your tests:
 This integrates with the ``coverage`` package to provide detailed code
 coverage analysis.
 
+Option Integration
+------------------
+
+Test cases can receive and use options passed via ``-X``:
+
+.. code-block:: python
+
+   class MyTestCase(DatabaseTestCaseProto):
+       @classmethod
+       def set_options(cls, options):
+           cls.enable_debug = options.get('debug') == 'on'
+           cls.database_url = options.get('database-url')
+
+       @classmethod
+       async def set_up_class_once(cls, ui):
+           if cls.database_url:
+               cls.db = await connect(cls.database_url)
+
+Run with custom options:
+
+.. code-block:: bash
+
+   geltest -X debug=on -X database-url=postgresql://localhost/test
+
 Requirements
 ============
 
-- Python 3.10+
+- Python 3.11+
 - click >= 8.1.0
-- psutil >= 5.8
+- coverage >= 7.4
 - typing-extensions >= 4.14.0
 
 The package is compatible with CPython on Linux, macOS, and Windows.

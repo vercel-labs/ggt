@@ -20,72 +20,68 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from typing_extensions import TypeAliasType
+from collections.abc import Mapping
 
+import contextlib
 import heapq
+import importlib
+import importlib.machinery
+import importlib.util
+import pathlib
+import pickle  # noqa: S403
 import re
+import sys
 import unittest
 
 
 if TYPE_CHECKING:
-    import pathlib
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
 
 Client = TypeAliasType("Client", Any)
 
 
-class ServerVersion(Protocol):
-    def __str__(self) -> str: ...
+class UI(Protocol):
+    def text(self, msg: str) -> None: ...
+    def info(self, msg: str) -> None: ...
+    def warning(self, msg: str) -> None: ...
+    def error(self, msg: str) -> None: ...
 
 
-class Instance(Protocol):
-    def get_data_dir(self) -> pathlib.Path: ...
-    def set_data_dir(self, data_dir: pathlib.Path) -> None: ...
-    def get_connect_args(self) -> dict[str, Any]: ...
-    def has_create_role(self) -> bool: ...
-    def has_create_database(self) -> bool: ...
-    def get_server_version(self) -> ServerVersion: ...
-    def stop(self) -> None: ...
-    async def start(self, *, port: int | None = None) -> None: ...
+@runtime_checkable
+class Fixture(Protocol):
+    def __get__(
+        self,
+        instance: Any | None,
+        owner: type[Any] | None = None,
+        /,
+    ) -> Any: ...
+    def set_options(self, options: Mapping[str, str]) -> None: ...
+    def get_shared_data(self) -> object: ...
+    def set_shared_data(self, data: object) -> None: ...
+    async def set_up(self, ui: UI) -> None: ...
+    async def tear_down(self, ui: UI) -> None: ...
+    async def post_session_set_up(
+        self, cases: Sequence[type[Any]], *, ui: UI
+    ) -> None: ...
 
 
 @runtime_checkable
 class DatabaseTestCaseProto(Protocol):
     @classmethod
-    def get_setup_script(cls) -> str: ...
+    def set_options(cls, options: Mapping[str, str]) -> None: ...
 
     @classmethod
-    def get_database_name(cls) -> str: ...
+    async def set_up_class_once(cls, ui: UI) -> None: ...
 
     @classmethod
-    def make_test_instance(
-        cls,
-        *,
-        backend_dsn: str | None = None,
-        cleanup_atexit: bool = False,
-        data_dir: str | None = None,
-    ) -> Instance: ...
+    async def tear_down_class_once(cls, ui: UI) -> None: ...
 
     @classmethod
-    def shutdown_test_instance(
-        cls,
-        instance: Instance,
-        *,
-        destroy: bool = False,
-    ) -> None: ...
+    def get_shared_data(cls) -> Mapping[str, object]: ...
 
     @classmethod
-    def get_cache_info(
-        cls, instance: Instance
-    ) -> tuple[pathlib.Path, str] | None: ...
-
-    @classmethod
-    def make_async_test_client(
-        cls, instance: Instance, **kwargs: Any
-    ) -> Client: ...
-
-    @classmethod
-    async def execute_retrying(cls, dbconn: Client, script: str) -> None: ...
+    def update_shared_data(cls, **data: object) -> None: ...
 
 
 class TestLoader(unittest.TestLoader):
@@ -382,3 +378,202 @@ def get_cases_by_shard(
     if verbosity >= 1:
         pass
     return _merge_results(result_cases)
+
+
+def _set_sys_path(entries: list[str]) -> None:
+    sys.path[:] = entries
+    importlib.invalidate_caches()
+
+
+@contextlib.contextmanager
+def _sys_path(*paths: str) -> Iterator[None]:
+    """Modify sys.path by temporarily placing the given entry in front"""
+    orig_sys_path = sys.path[:]
+    paths_set = {*paths}
+    _set_sys_path([*paths, *(p for p in orig_sys_path if p not in paths_set)])
+    try:
+        yield
+    finally:
+        _set_sys_path(orig_sys_path)
+
+
+_ImportLocation = TypeAliasType("_ImportLocation", tuple[list[str], str, str])
+
+
+def _get_module_spec(modname: str) -> importlib.machinery.ModuleSpec:
+    spec: importlib.machinery.ModuleSpec | None = None
+    if (module := sys.modules.get(modname)) is not None:
+        spec = module.__spec__
+
+    if spec is None:
+        spec = importlib.util.find_spec(modname)
+
+    if spec is None:
+        raise RuntimeError(f"cannot find module spec for {modname}")
+
+    return spec
+
+
+def _get_class_import_location(cls: type[Any]) -> _ImportLocation:
+    top_mod, _, _ = cls.__module__.partition(".")
+    top_level = _get_module_spec(top_mod)
+    if not top_level.has_location:
+        raise RuntimeError(
+            f"{cls} originiates from a module that has no loadable location"
+        )
+
+    search_paths: list[str] = []
+
+    if top_level.origin is not None:
+        path = pathlib.Path(top_level.origin)
+        if not path.exists():
+            raise RuntimeError(
+                f"{cls} originiates from a module that cannot be loaded from "
+                f"a path: {path}"
+            )
+
+        if top_level.parent == top_level.name:
+            parent_dir = path.parent.parent
+        else:
+            parent_dir = path.parent
+
+        search_paths.append(str(parent_dir))
+
+    elif locs := top_level.submodule_search_locations:
+        for loc in locs:
+            path = pathlib.Path(loc)
+            if path.exists():
+                search_paths.append(str(path.parent))
+
+    if not search_paths:
+        raise RuntimeError(
+            f"{cls} originiates from a module that cannot be loaded from "
+            f"any path"
+        )
+
+    return search_paths, cls.__module__, cls.__qualname__
+
+
+def _restore_TestCase(
+    clsloc: _ImportLocation,
+    newargs: tuple[tuple[Any, ...], dict[str, Any]],
+    state: object,
+) -> unittest.TestCase:
+    search_paths, modname, clsname = clsloc
+    with _sys_path(*search_paths):
+        mod = importlib.import_module(modname)
+
+    cls = getattr(mod, clsname)
+    if not issubclass(cls, unittest.TestCase):
+        raise RuntimeError(f"unexpected non-TestCase type: {cls}")
+
+    test: unittest.TestCase = cls.__new__(cls, *newargs[0], **newargs[1])
+    if callable(setstate := getattr(test, "__setstate__", None)):
+        setstate(state)
+    elif isinstance(state, dict):
+        test.__dict__.update(state)
+
+    return test
+
+
+def _reduce_TestCase(
+    test: unittest.TestCase,
+) -> tuple[
+    Callable[..., unittest.TestCase],
+    tuple[
+        _ImportLocation,
+        tuple[tuple[Any, ...], dict[str, Any]],
+        object | None,
+    ],
+]:
+    clsloc = _get_class_import_location(type(test))
+    newargs: tuple[Any, ...]
+    newkwargs: dict[str, Any]
+    if (getnewargs_ex := getattr(test, "__getnewargs_ex__", None)) is not None:
+        newargs, newkwargs = getnewargs_ex()
+    elif (getnewargs := getattr(test, "__getnewargs__", None)) is not None:
+        newargs = getnewargs()
+        newkwargs = {}
+    else:
+        newargs = ()
+        newkwargs = {}
+
+    state: object | None
+    if (getstate := getattr(test, "__getstate__", None)) is not None:
+        state = getstate()
+    elif (dct := getattr(test, "__dict__", None)) is not None:
+        state = {**dct}
+    else:
+        state = None
+
+    if isinstance(state, Mapping):
+        # Check state contents for pickleability
+        # and exclude attributes that are unpickleable.
+        # Technically this is unsound, but the runner
+        # infrastructure should not depend on any of those.
+        state = {**state}
+        for k, v in [*state.items()]:
+            try:
+                pickle.dumps(v)
+            except Exception:
+                state.pop(k)
+
+    return _restore_TestCase, (clsloc, (newargs, newkwargs), state)
+
+
+class TestCasePickleWrapper:
+    """Makes TestCases more reliably unpickleable"""
+
+    def __init__(self, case: unittest.TestCase) -> None:
+        self._case = case
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return _reduce_TestCase(self._case)
+
+
+def discover(
+    paths: Sequence[str],
+    *,
+    verbosity: int = 1,
+    exclude: Sequence[str] = (),
+    include: Sequence[str] = (),
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> unittest.TestSuite:
+    test_loader = TestLoader(
+        verbosity=verbosity,
+        exclude=exclude,
+        include=include,
+        progress_cb=progress_cb,
+    )
+
+    suite = unittest.TestSuite()
+
+    for entry in paths:
+        file = pathlib.Path(entry).absolute()
+
+        # Establish the top_level_dir as the parent of
+        # the topmost directory containing __init__.py.
+        # This ensures correct test module package structure
+        # and enables relative imports within.
+        top_level_dir = file.parent
+        while (top_level_dir / "__init__.py").exists():
+            top_level_dir = top_level_dir.parent
+
+        top_level_dir_str = str(top_level_dir)
+        # Make sure we import from the correct place
+        with _sys_path(top_level_dir_str):
+            if file.is_dir():
+                tests = test_loader.discover(
+                    start_dir=str(file),
+                    top_level_dir=top_level_dir_str,
+                )
+            else:
+                tests = test_loader.discover(
+                    start_dir=str(file.parent),
+                    pattern=file.name,
+                    top_level_dir=top_level_dir_str,
+                )
+
+        suite.addTest(tests)
+
+    return suite

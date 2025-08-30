@@ -18,12 +18,14 @@
 
 
 from __future__ import annotations
+from typing import TYPE_CHECKING, Any
 
 import logging
 import multiprocessing.pool
 import multiprocessing.process
+import multiprocessing.reduction
 import multiprocessing.util
-from typing import Any, TYPE_CHECKING
+import types
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,6 +56,8 @@ def multiprocessing_pool_worker(
     *args: Any,
     **kwargs: Any,
 ) -> None:
+    patch_multiprocessing_reduction()
+
     destructor: Callable[..., Any] | None = None
     if isinstance(initializer, WorkerScope):
         destructor = initializer.destructor
@@ -111,6 +115,10 @@ def join_exited_workers(pool: Any) -> None:
     pass
 
 
+def _restore_Traceback() -> None:
+    return None
+
+
 def patch_multiprocessing(*, debug: bool) -> None:
     global _orig_pool_worker_handler, _orig_pool_join_exited_workers  # noqa: PLW0603
 
@@ -134,3 +142,17 @@ def patch_multiprocessing(*, debug: bool) -> None:
         multiprocessing.pool.Pool._join_exited_workers  # type: ignore [attr-defined]
     )
     multiprocessing.pool.Pool._join_exited_workers = join_exited_workers  # type: ignore [attr-defined]
+
+    patch_multiprocessing_reduction()
+
+
+def patch_multiprocessing_reduction() -> None:
+    # Disable pickling of traceback objects in multiprocessing.
+    # Test errors' tracebacks are serialized manually by
+    # `TestReesult._exc_info_to_string()`.  Therefore we need
+    # to make sure that some random __traceback__ attribute
+    # doesn't crash the test results queue.
+    multiprocessing.reduction.register(
+        types.TracebackType,
+        lambda _: (_restore_Traceback, ()),
+    )

@@ -29,7 +29,6 @@ classifiers = [
 dependencies = [
     'click >= 8.1.0',
     'coverage >= 7.4',
-    'gel >= 3.0',
     'typing-extensions >= 4.14.0',
 ]
 
