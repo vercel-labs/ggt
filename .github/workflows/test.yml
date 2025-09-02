@@ -1,0 +1,42 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+  workflow_dispatch:
+    inputs: {}
+
+jobs:
+  lint:
+    strategy:
+      matrix:
+        # A separate run on Windows is needed
+        # because typing of stdlib might be different.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions: {}  # None needed
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/ruff-action@57714a7c8a2e59f32539362ba31877a1957dded1  # v3.5.1
+        with:
+          version: "0.12.11"
+      - uses: python/mypy@7e7d7a7a3e09350f7e2beff0cde10d997539ef6e
+        with:
+          version: "1.17.1"
+
+  test-status:
+    name: "Regression Tests"
+    needs: [lint]
+    runs-on: ubuntu-latest
+
+    steps:
+      - run: echo OK
