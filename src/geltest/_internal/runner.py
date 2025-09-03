@@ -1147,16 +1147,18 @@ class ParallelTextTestResult(unittest.result.TestResult):
                 (test, self._exc_info_to_string(err, test))
             )
         else:
-            marker = Markers.xfailed
             reason = xfail.reason
             is_fail = _is_assert_failure(err)
             if (xfail.expect_failure and is_fail) or (
                 xfail.expect_error and not is_fail
             ):
+                marker = Markers.xfailed
                 super().addExpectedFailure(test, err)
             elif is_fail:
+                marker = Markers.failed
                 super().addFailure(test, err)
             else:
+                marker = Markers.errored
                 super().addError(test, err)
 
         self.report_progress(test, marker, reason)
