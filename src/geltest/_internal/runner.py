@@ -1321,7 +1321,7 @@ class ParallelTextTestRunner:
                     result.test_stats + setup_stats + teardown_stats
                 ):
                     name = str(test_obj)
-                    t = stat["running-time"]
+                    t = stat.get("running-time", 0)
                     at, c = stats.get(name, (0, 0))
                     stats[name] = (at + (t - at) / (c + 1), c + 1)
                 running_times_log_file.seek(0)

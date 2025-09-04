@@ -6,7 +6,7 @@ authors = [
     { name = "Gel Contributors" },
 ]
 version = "1.0.0"
-requires-python = ">=3.11.0"
+requires-python = ">=3.10.0"
 readme = "README.rst"
 license = { text = "Apache License, Version 2.0" }
 keywords = ["gel", "edgedb", "database", "test"]
@@ -64,7 +64,7 @@ exclude = [
     "^target",
 ]
 files = ["src/**/*.py"]
-python_version = "3.11"
+python_version = "3.10"
 follow_imports = "normal"
 strict = true
 ignore_errors = false
@@ -77,7 +77,7 @@ local_partial_types = true
 
 [tool.pyright]
 include = ["src/**"]
-pythonVersion = "3.11"
+pythonVersion = "3.10"
 typeCheckingMode = "standard"
 
 # ========================
@@ -85,7 +85,7 @@ typeCheckingMode = "standard"
 # ========================
 [tool.black]
 line-length = 79
-target-version = ["py311"]
+target-version = ["py310"]
 
 # ========================
 #           RUFF
@@ -94,7 +94,7 @@ target-version = ["py311"]
 [tool.ruff]
 line-length = 79
 indent-width = 4
-target-version = "py311"
+target-version = "py310"
 exclude = [".github", ".git", "build", "dist", ".eggs"]
 
 [tool.ruff.lint]
@@ -156,4 +156,5 @@ extend-ignore = [
     "SIM117",  # multiple-with-statements
     "UP045",   # non-pep604-annotation-optional
     "PLR5501", # collapsible-else-if
+    "PERF203"  # try-except-in-loop
 ]

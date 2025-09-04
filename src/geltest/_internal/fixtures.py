@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
-from typing_extensions import TypeAliasType, TypedDict
-from typing import Required
+from typing_extensions import TypeAliasType, TypedDict, Required
 
 import asyncio
 import functools
@@ -227,27 +226,29 @@ async def _call_session_phase(
         for case in eligible:
             await callback(test_case=case, stats=stats, options=options, ui=ui)
     else:
-        async with asyncio.TaskGroup() as g:
-            # Use a semaphore to limit the concurrency of bootstrap
-            # tasks to the number of jobs (bootstrap is heavy, having
-            # more tasks than `--jobs` won't necessarily make
-            # things faster.)
-            sem = asyncio.BoundedSemaphore(num_jobs)
+        # Use a semaphore to limit the concurrency of bootstrap
+        # tasks to the number of jobs (bootstrap is heavy, having
+        # more tasks than `--jobs` won't necessarily make
+        # things faster.)
+        sem = asyncio.BoundedSemaphore(num_jobs)
 
-            async def controller(
-                cb: _PhaseCallback,
-                test_case: type[loader.DatabaseTestCaseProto],
-            ) -> None:
-                async with sem:
-                    await cb(
-                        test_case=test_case,
-                        stats=stats,
-                        options=options,
-                        ui=ui,
-                    )
+        async def controller(
+            test_case: type[loader.DatabaseTestCaseProto],
+        ) -> None:
+            async with sem:
+                await callback(
+                    test_case=test_case,
+                    stats=stats,
+                    options=options,
+                    ui=ui,
+                )
 
-            for case in eligible:
-                g.create_task(controller(callback, case))
+        if sys.version_info >= (3, 11):
+            async with asyncio.TaskGroup() as g:
+                for case in eligible:
+                    g.create_task(controller(case))
+        else:
+            await asyncio.gather(controller(case) for case in eligible)
 
     ui.text("\n")
 

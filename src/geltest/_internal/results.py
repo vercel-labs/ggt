@@ -299,7 +299,7 @@ def render_result(file: TextIO, result: TestResult) -> None:
 
 
 def _result_log_path(path_template: str) -> pathlib.Path | None:
-    now = str(datetime.datetime.now(datetime.UTC)).replace(" ", "_")
+    now = str(datetime.datetime.now(datetime.timezone.utc)).replace(" ", "_")
     path = pathlib.Path(path_template.replace("%TIMESTAMP%", now))
 
     parent_dir = path.parent
