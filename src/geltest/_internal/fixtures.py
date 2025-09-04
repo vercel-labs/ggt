@@ -248,7 +248,7 @@ async def _call_session_phase(
                 for case in eligible:
                     g.create_task(controller(case))
         else:
-            await asyncio.gather(controller(case) for case in eligible)
+            await asyncio.gather(*(controller(case) for case in eligible))
 
     ui.text("\n")
 
