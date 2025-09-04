@@ -166,7 +166,6 @@ def _parse_key_value(
         "%TIMESTAMP%, it will be replaced by ISO8601 date and time. "
         "Empty string means not to write the log at all."
     ),
-    default="build/test-results/%TIMESTAMP%.json",
 )
 @click.option(
     "--include-unsuccessful",
