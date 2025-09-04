@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from typing_extensions import TypeAliasType, TypedDict, Required
 
 import asyncio
@@ -45,7 +45,7 @@ async def setup_test_cases(
     options: Mapping[str, str] | None = None,
     num_jobs: int = 1,
     ui: loader.UI,
-) -> tuple[Stats, dict[str, object]]:
+) -> Stats:
     fixture_data: dict[str, object] = {}
     fixtures: list[loader.Fixture] = []
 
@@ -72,7 +72,16 @@ async def setup_test_cases(
     for fixture in fixtures:
         await fixture.post_session_set_up(cases, ui=ui)
 
-    return stats, fixture_data
+    class_data: dict[str, Mapping[str, object]] = {}
+    for testcls in cases:
+        if issubclass(testcls, loader.DatabaseTestCaseProto):
+            key = f"{testcls.__module__}.{testcls.__qualname__}".upper()
+            class_data[key] = testcls.get_shared_data()
+
+    export_global_fixture_data(fixture_data)
+    export_class_fixture_data(class_data)
+
+    return stats
 
 
 async def tear_down_test_cases(
@@ -112,34 +121,38 @@ async def tear_down_test_cases(
 
 @functools.cache
 def _find_all_global_fixture_data() -> dict[tuple[str, str, str], str]:
-    result: dict[tuple[str, str, str], str] = {}
-
-    for env_var, serialized_data in os.environ.items():
-        _, pfx, key = env_var.partition("GEL_TEST_GLOBAL_DATA_")
-        if not pfx:
-            # Not a global fixture data entry
-            continue
-
-        clsfqname, sep, attr = key.partition(":")
-        if not sep:
-            # Improperly formatted key?
+    result: dict[tuple[str, str, str], Any] = {}
+    data = os.environ.get("GEL_TEST_GLOBAL_DATA")
+    if data:
+        try:
+            values = json.loads(data)
+            if not isinstance(values, dict):
+                raise ValueError("expected a dict in GEL_TEST_GLOBAL_DATA")
+        except ValueError:
             # XXX: log a warning
-            continue
+            values = {}
 
-        modname, dot, clsname = clsfqname.rpartition(".")
-        if not dot:
-            # Improperly formatted key?
-            # XXX: log a warning
-            continue
+        for key, value in values.items():
+            clsfqname, sep, attr = key.partition(":")
+            if not sep:
+                # Improperly formatted key?
+                # XXX: log a warning
+                continue
 
-        result[modname, clsname, attr] = serialized_data
+            modname, dot, clsname = clsfqname.rpartition(".")
+            if not dot:
+                # Improperly formatted key?
+                # XXX: log a warning
+                continue
+
+            result[modname, clsname, attr] = value
 
     return result
 
 
 def import_global_fixture_data() -> None:
     fixture_data = _find_all_global_fixture_data()
-    for (modname, clsname, attr), serialized_data in fixture_data.items():
+    for (modname, clsname, attr), data in fixture_data.items():
         if (
             # the module containing the class was imported
             (mod := sys.modules.get(modname)) is not None
@@ -151,20 +164,14 @@ def import_global_fixture_data() -> None:
                 loader.Fixture,
             )
         ):
-            try:
-                data = json.loads(serialized_data)
-            except ValueError:
-                # XXX: log a warning
-                pass
-            else:
-                fixture.set_shared_data(data)
+            fixture.set_shared_data(data)
 
 
 def import_class_fixture_data(cls: type[unittest.TestCase]) -> None:
     if not issubclass(cls, loader.DatabaseTestCaseProto):
         return
     cls_key = f"{cls.__module__}.{cls.__qualname__}"
-    env_key = f"GEL_TEST_CLASS_DATA_{cls_key}"
+    env_key = f"GEL_TEST_CLASS_DATA_{cls_key.upper()}"
     data_string = os.environ.get(env_key, "")
     if data_string:
         class_data = json.loads(data_string)
@@ -176,8 +183,7 @@ def import_class_fixture_data(cls: type[unittest.TestCase]) -> None:
 def export_global_fixture_data(
     global_fixture_data: Mapping[str, object],
 ) -> None:
-    for key, data in global_fixture_data.items():
-        os.environ[f"GEL_TEST_GLOBAL_DATA_{key}"] = json.dumps(data)
+    os.environ["GEL_TEST_GLOBAL_DATA"] = json.dumps(global_fixture_data)
 
 
 def export_class_fixture_data(

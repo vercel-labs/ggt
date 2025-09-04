@@ -1251,7 +1251,7 @@ class ParallelTextTestRunner:
         teardown_stats = []
 
         try:
-            setup_stats, fixture_data = asyncio.run(
+            setup_stats = asyncio.run(
                 fixtures.setup_test_cases(
                     [*cases],
                     num_jobs=self.num_workers,
@@ -1261,15 +1261,7 @@ class ParallelTextTestRunner:
             )
             bootstrap_time_taken = time.monotonic() - session_start
 
-            class_data: dict[str, Mapping[str, object]] = {}
-            for testcls in cases:
-                if issubclass(testcls, loader.DatabaseTestCaseProto):
-                    key = f"{testcls.__module__}.{testcls.__qualname__}"
-                    class_data[key] = testcls.get_shared_data()
-
             os.environ["GEL_TEST_SETUP_RESPONSIBLE"] = "runner"
-            fixtures.export_global_fixture_data(fixture_data)
-            fixtures.export_class_fixture_data(class_data)
 
             start = time.monotonic()
 
