@@ -405,11 +405,9 @@ def status_thread_func(
     result: ParallelTextTestResult,
     stop_event: threading.Event,
 ) -> None:
-    while True:
+    while not stop_event.is_set():
         result.report_still_running()
-        time.sleep(1)
-        if stop_event.is_set():
-            break
+        stop_event.wait(1)
 
 
 class ParallelTestSuite(unittest.TestSuite):
