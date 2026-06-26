@@ -1,3 +1,7 @@
+# SPDX-PackageName: ggt
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
+
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -25,11 +29,11 @@ class CoverageConfig(NamedTuple):
         return cls(**dct)
 
     def save_to_environ(self) -> None:
-        os.environ.update({"EDGEDB_TEST_COVERAGE": self.to_json()})
+        os.environ.update({"GGT_COVERAGE": self.to_json()})
 
     @classmethod
     def from_environ(cls) -> CoverageConfig | None:
-        config = os.environ.get("EDGEDB_TEST_COVERAGE")
+        config = os.environ.get("GGT_COVERAGE")
         if config is None:
             return None
         else:

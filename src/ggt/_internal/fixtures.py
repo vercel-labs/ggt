@@ -1,6 +1,10 @@
+# SPDX-PackageName: ggt
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
+
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Protocol
-from typing_extensions import TypeAliasType, TypedDict, Required
+from typing import TYPE_CHECKING, Any, Protocol, Required
+from typing_extensions import TypeAliasType, TypedDict
 
 import asyncio
 import functools
@@ -32,7 +36,7 @@ class _PhaseCallback(Protocol):
     @staticmethod
     async def __call__(
         *,
-        test_case: type[loader.DatabaseTestCaseProto],
+        test_case: type[loader.GGTProto],
         stats: Stats,
         options: Mapping[str, str] | None = None,
         ui: loader.UI,
@@ -40,7 +44,7 @@ class _PhaseCallback(Protocol):
 
 
 async def setup_test_cases(
-    cases: Sequence[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+    cases: Sequence[type[unittest.TestCase | loader.GGTProto]],
     *,
     options: Mapping[str, str] | None = None,
     num_jobs: int = 1,
@@ -74,7 +78,7 @@ async def setup_test_cases(
 
     class_data: dict[str, Mapping[str, object]] = {}
     for testcls in cases:
-        if issubclass(testcls, loader.DatabaseTestCaseProto):
+        if issubclass(testcls, loader.GGTProto):
             key = f"{testcls.__module__}.{testcls.__qualname__}".upper()
             class_data[key] = testcls.get_shared_data()
 
@@ -85,7 +89,7 @@ async def setup_test_cases(
 
 
 async def tear_down_test_cases(
-    cases: Sequence[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+    cases: Sequence[type[unittest.TestCase | loader.GGTProto]],
     *,
     options: Mapping[str, str] | None = None,
     num_jobs: int = 1,
@@ -122,12 +126,12 @@ async def tear_down_test_cases(
 @functools.cache
 def _find_all_global_fixture_data() -> dict[tuple[str, str, str], str]:
     result: dict[tuple[str, str, str], Any] = {}
-    data = os.environ.get("GEL_TEST_GLOBAL_DATA")
+    data = os.environ.get("GGT_TEST_GLOBAL_DATA")
     if data:
         try:
             values = json.loads(data)
             if not isinstance(values, dict):
-                raise ValueError("expected a dict in GEL_TEST_GLOBAL_DATA")
+                raise ValueError("expected a dict in GGT_TEST_GLOBAL_DATA")
         except ValueError:
             # XXX: log a warning
             values = {}
@@ -168,10 +172,10 @@ def import_global_fixture_data() -> None:
 
 
 def import_class_fixture_data(cls: type[unittest.TestCase]) -> None:
-    if not issubclass(cls, loader.DatabaseTestCaseProto):
+    if not issubclass(cls, loader.GGTProto):
         return
     cls_key = f"{cls.__module__}.{cls.__qualname__}"
-    env_key = f"GEL_TEST_CLASS_DATA_{cls_key.upper()}"
+    env_key = f"GGT_TEST_CLASS_DATA_{cls_key.upper()}"
     data_string = os.environ.get(env_key, "")
     if data_string:
         class_data = json.loads(data_string)
@@ -183,21 +187,21 @@ def import_class_fixture_data(cls: type[unittest.TestCase]) -> None:
 def export_global_fixture_data(
     global_fixture_data: Mapping[str, object],
 ) -> None:
-    os.environ["GEL_TEST_GLOBAL_DATA"] = json.dumps(global_fixture_data)
+    os.environ["GGT_TEST_GLOBAL_DATA"] = json.dumps(global_fixture_data)
 
 
 def export_class_fixture_data(
     class_fixture_data: Mapping[str, Mapping[str, object]],
 ) -> None:
     for key, data in class_fixture_data.items():
-        os.environ[f"GEL_TEST_CLASS_DATA_{key}"] = json.dumps(data)
+        os.environ[f"GGT_TEST_CLASS_DATA_{key}"] = json.dumps(data)
 
 
 def _collect_global_fixtures(
-    cases: Iterable[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+    cases: Iterable[type[unittest.TestCase | loader.GGTProto]],
 ) -> Iterator[
     tuple[
-        type[unittest.TestCase | loader.DatabaseTestCaseProto],
+        type[unittest.TestCase | loader.GGTProto],
         str,
         loader.Fixture,
     ]
@@ -209,22 +213,18 @@ def _collect_global_fixtures(
             if isinstance(attr, loader.Fixture) and attr not in seen:
                 seen.add(attr)
                 origin = next(c for c in case.__mro__ if name in c.__dict__)
-                yield origin, name, attr
+                yield origin, name, attr  # ty: ignore[invalid-yield]
 
 
 async def _call_session_phase(
     *,
     callback: _PhaseCallback,
-    cases: Iterable[type[unittest.TestCase | loader.DatabaseTestCaseProto]],
+    cases: Iterable[type[unittest.TestCase | loader.GGTProto]],
     num_jobs: int = 1,
     options: Mapping[str, str] | None = None,
     ui: loader.UI,
 ) -> Stats:
-    eligible = [
-        case
-        for case in cases
-        if issubclass(case, loader.DatabaseTestCaseProto)
-    ]
+    eligible = [case for case in cases if issubclass(case, loader.GGTProto)]
 
     stats: Stats = []
     if num_jobs == 1:
@@ -239,7 +239,7 @@ async def _call_session_phase(
         sem = asyncio.BoundedSemaphore(num_jobs)
 
         async def controller(
-            test_case: type[loader.DatabaseTestCaseProto],
+            test_case: type[loader.GGTProto],
         ) -> None:
             async with sem:
                 await callback(
@@ -249,12 +249,9 @@ async def _call_session_phase(
                     ui=ui,
                 )
 
-        if sys.version_info >= (3, 11):
-            async with asyncio.TaskGroup() as g:
-                for case in eligible:
-                    g.create_task(controller(case))
-        else:
-            await asyncio.gather(*(controller(case) for case in eligible))
+        async with asyncio.TaskGroup() as g:
+            for case in eligible:
+                g.create_task(controller(case))
 
     ui.text("\n")
 
@@ -263,7 +260,7 @@ async def _call_session_phase(
 
 async def _setup_test_case(
     *,
-    test_case: type[loader.DatabaseTestCaseProto],
+    test_case: type[loader.GGTProto],
     stats: Stats,
     options: Mapping[str, str] | None = None,
     ui: loader.UI,
@@ -280,7 +277,7 @@ async def _setup_test_case(
 
 async def _tear_down_test_case(
     *,
-    test_case: type[loader.DatabaseTestCaseProto],
+    test_case: type[loader.GGTProto],
     stats: Stats,
     options: Mapping[str, str] | None = None,
     ui: loader.UI,

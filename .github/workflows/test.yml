@@ -1,17 +1,15 @@
-name: Test
+name: CI
 
 on:
   push:
     branches:
       - main
   pull_request:
-    branches:
-      - "*"
   workflow_dispatch:
     inputs: {}
 
 jobs:
-  lint:
+  test:
     strategy:
       matrix:
         # A separate run on Windows is needed
@@ -20,23 +18,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions: {}  # None needed
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
-          python-version: "3.10"
-      - uses: astral-sh/ruff-action@57714a7c8a2e59f32539362ba31877a1957dded1  # v3.5.1
-        with:
-          version: "0.12.11"
-      - uses: python/mypy@7e7d7a7a3e09350f7e2beff0cde10d997539ef6e
-        with:
-          version: "1.17.1"
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9  # v7
 
-  test-status:
-    name: "Regression Tests"
-    needs: [lint]
-    runs-on: ubuntu-latest
-
-    steps:
-      - run: echo OK
+      - run: uv sync --dev
+      - run: uv run --dev ruff format --check src tests
+      - run: uv run --dev ruff check src/ggt pyproject.toml
+      - run: uv run --dev mypy src/ggt
+      - run: uv run --dev ty check src tests
+      - run: uv run --dev zizmor .github/workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

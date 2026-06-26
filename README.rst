@@ -1,67 +1,13 @@
-=======
-Geltest
-=======
+================================================
+ggt - go-go test -- make Python unittest go fast 
+================================================
 
-**Supercharged Python Unittest Runner**
+`ggt` is a `unittest` runner for Python that runs tests in parallel with the
+ability to run and share test setup.  `ggt` also provides a `pytest`-like CLI
+to run tests with some useful test selection and running features.  
 
-Geltest is a powerful, parallel test runner designed for Gel database
-applications. It extends Python's built-in unittest framework with advanced
-features like parallel execution, flexible fixture management, comprehensive
-reporting, and intelligent test sharding. While optimized for Gel workflows,
-it provides a generalized architecture for complex test suite requirements.
-
-.. contents:: Table of Contents
-   :local:
-   :depth: 2
-
-Features
-========
-
-🚀 **Parallel Execution**
-   Run tests across multiple worker processes to dramatically reduce test
-   suite execution time
-
-🗄️ **Flexible Fixture System**
-   Powerful session-level fixture management with automatic setup and teardown
-   of test prerequisites
-
-📊 **Rich Output Formats**
-   Multiple output formats including simple dots, verbose descriptions, and a
-   beautiful stacked progress display
-
-🎯 **Smart Test Selection**
-   Filter tests with regex patterns, run specific shards, or include only
-   previously failed tests
-
-📈 **Performance Tracking**
-   Track test execution times and maintain running time logs for performance
-   analysis
-
-⚡ **Advanced Features**
-   - Test shuffling for randomization
-   - Coverage reporting integration
-   - Configurable timeouts with ``@async_timeout``
-   - Expected failure decorators (``@xfail``, ``@xerror``,
-     ``@not_implemented``)
-   - Comprehensive warning capture and reporting
-   - Extensible option system for test suite customization
-
-Installation
-============
-
-Install geltest using pip:
-
-.. code-block:: bash
-
-   pip install geltest
-
-Or install from source:
-
-.. code-block:: bash
-
-   git clone https://github.com/geldata/geltest.git
-   cd geltest
-   pip install -e .
+There is no runtim bloat or magic, it's standard `unittest` underneath,
+which makes running tests with `ggt` *fast*.
 
 Quick Start
 ===========
@@ -73,50 +19,50 @@ Run all tests in the current directory:
 
 .. code-block:: bash
 
-   geltest
+   ggt
 
 Run tests in specific files or directories:
 
 .. code-block:: bash
 
-   geltest tests/test_models.py tests/integration/
+   ggt tests/test_models.py tests/integration/
 
-Run tests in parallel using 4 worker processes:
+Run tests sequentially:
 
 .. code-block:: bash
 
-   geltest -j 4
+   ggt -j1
 
 Verbose output with detailed test descriptions:
 
 .. code-block:: bash
 
-   geltest -v
+   ggt -v
 
 Filter Tests
 ------------
 
-Run only tests matching a pattern:
+Run only tests matching a regular expression:
 
 .. code-block:: bash
 
-   geltest -k "test_user.*create"
+   ggt -k "test_user.*create"
 
 Exclude tests matching a pattern:
 
 .. code-block:: bash
 
-   geltest -e "test_slow.*"
+   ggt -e "test_slow.*"
 
 Run tests in shards (useful for CI):
 
 .. code-block:: bash
 
    # Run shard 2 out of 4 total shards
-   geltest -s 2/4
+   ggt -s 2/4
 
-Command Line Options
-====================
+Command Line Option Reference
+=============================
 
 Core Options
 ------------
@@ -129,7 +75,7 @@ Core Options
 
 ``-j, --jobs INTEGER``
    Number of parallel worker processes. Default is 0 (auto-detect based on
-   CPU cores).
+   the number of CPU cores).
 
 ``-s, --shard TEXT``
    Run tests in shards using format ``current/total`` (e.g., ``2/4``).
@@ -185,13 +131,13 @@ Output and Reporting
    .. code-block:: bash
 
       # Enable database caching
-      geltest -X test-db-cache=on
+      ggt -X test-db-cache=on
 
       # Specify custom data directory
-      geltest -X data-dir=/custom/path
+      ggt -X data-dir=/custom/path
 
       # Multiple options
-      geltest -X backend-dsn=postgresql://... -X use-ssl=true
+      ggt -X backend-dsn=postgresql://... -X use-ssl=true
 
 Advanced Options
 ----------------
@@ -239,9 +185,9 @@ Test Decorators
 Fixture System
 --------------
 
-Geltest provides a powerful fixture system for managing test prerequisites
-at the session level. Fixtures are declared as class attributes and
-automatically handle setup and teardown across the entire test session.
+`ggt` provides a fixture system for managing test prerequisites at the session
+level. Fixtures are declared as class attributes and automatically handle setup
+and teardown across the entire test session.
 
 Basic Fixture Example:
 
@@ -292,11 +238,11 @@ Test Case Protocol
 ------------------
 
 For advanced test cases that need session-level setup and configuration,
-implement the ``DatabaseTestCaseProto`` protocol:
+implement the ``GGTProto`` protocol:
 
 .. code-block:: python
 
-   class MyAdvancedTestCase(unittest.TestCase, DatabaseTestCaseProto):
+   class MyAdvancedTestCase(unittest.TestCase):
        @classmethod
        def set_options(cls, options):
            """Receive command-line options passed via -X"""
@@ -315,11 +261,23 @@ implement the ``DatabaseTestCaseProto`` protocol:
            if hasattr(cls, 'connection'):
                await cls.connection.close()
 
+       @classmethod
+       def get_shared_data(cls):
+           """Return JSON-serializable data to share with worker processes"""
+           return {}
+
+       @classmethod
+       def update_shared_data(cls, **data):
+           """Receive data exported during session setup"""
+           pass
+
 The protocol methods are:
 
 - ``set_options(options)``: Receives command-line options from ``-X`` flags
 - ``set_up_class_once(ui)``: Async setup called once per test class
 - ``tear_down_class_once(ui)``: Async teardown called once per test class
+- ``get_shared_data()``: Returns JSON-serializable data for worker processes
+- ``update_shared_data(**data)``: Receives shared data in worker processes
 
 Output Formats
 ==============
@@ -363,16 +321,16 @@ Performance and Optimization
 Parallel Execution
 ------------------
 
-Geltest automatically detects the optimal number of worker processes based
+ggt automatically detects the optimal number of worker processes based
 on your CPU cores. You can override this:
 
 .. code-block:: bash
 
    # Use specific number of workers
-   geltest -j 8
+   ggt -j 8
 
    # Use single-threaded execution
-   geltest -j 1
+   ggt -j 1
 
 Fixture Options
 ---------------
@@ -382,13 +340,13 @@ Pass configuration to your fixtures using the ``-X`` option:
 .. code-block:: bash
 
    # Enable caching in your fixtures
-   geltest -X test-cache=on
+   ggt -X test-cache=on
 
    # Pass database configuration
-   geltest -X database-url=postgresql://localhost/testdb
+   ggt -X database-url=postgresql://localhost/testdb
 
    # Multiple configuration options
-   geltest -X cache=on -X timeout=30 -X verbose=true
+   ggt -X cache=on -X timeout=30 -X verbose=true
 
 Your fixtures receive these options in their ``set_options()`` method and
 can use them to customize behavior.
@@ -401,12 +359,12 @@ Distribute tests across multiple CI jobs using sharding:
 .. code-block:: bash
 
    # Job 1 of 4
-   geltest -s 1/4
+   ggt -s 1/4
 
    # Job 2 of 4
-   geltest -s 2/4
+   ggt -s 2/4
 
-Geltest intelligently distributes tests to balance load across shards.
+ggt intelligently distributes tests to balance load across shards.
 
 Integration
 ===========
@@ -432,9 +390,9 @@ Example GitHub Actions configuration:
          - uses: actions/setup-python@v4
            with:
              python-version: '3.11'
-         - run: pip install geltest
+         - run: pip install ggt
          - run: |
-             geltest -s ${{ matrix.shard }}/4 \
+             ggt -s ${{ matrix.shard }}/4 \
                --result-log results-${{ matrix.shard }}.json \
                -X test-cache=on -X timeout=300
          - uses: actions/upload-artifact@v3
@@ -449,7 +407,7 @@ Generate coverage reports alongside your tests:
 
 .. code-block:: bash
 
-   geltest --cov myproject --cov myproject.submodule
+   ggt --cov myproject --cov myproject.submodule
 
 This integrates with the ``coverage`` package to provide detailed code
 coverage analysis.
@@ -461,7 +419,7 @@ Test cases can receive and use options passed via ``-X``:
 
 .. code-block:: python
 
-   class MyTestCase(DatabaseTestCaseProto):
+   class MyTestCase(unittest.TestCase):
        @classmethod
        def set_options(cls, options):
            cls.enable_debug = options.get('debug') == 'on'
@@ -472,16 +430,29 @@ Test cases can receive and use options passed via ``-X``:
            if cls.database_url:
                cls.db = await connect(cls.database_url)
 
+       @classmethod
+       async def tear_down_class_once(cls, ui):
+           if hasattr(cls, 'db'):
+               await cls.db.close()
+
+       @classmethod
+       def get_shared_data(cls):
+           return {}
+
+       @classmethod
+       def update_shared_data(cls, **data):
+           pass
+
 Run with custom options:
 
 .. code-block:: bash
 
-   geltest -X debug=on -X database-url=postgresql://localhost/test
+   ggt -X debug=on -X database-url=postgresql://localhost/test
 
 Requirements
 ============
 
-- Python 3.10+
+- Python 3.11+
 - click >= 8.1.0
 - coverage >= 7.4
 - typing-extensions >= 4.14.0
@@ -491,16 +462,11 @@ The package is compatible with CPython on Linux, macOS, and Windows.
 License
 =======
 
-Geltest is licensed under the Apache License, Version 2.0. See the LICENSE
+ggt is licensed under the Apache License, Version 2.0. See the LICENSE
 file for details.
 
 Contributing
 ============
 
-We welcome contributions! Please see our `GitHub repository
-<https://github.com/geldata/geltest>`_ for:
-
-- Issue reporting
-- Feature requests
-- Pull request guidelines
-- Development setup instructions
+Contributions are welcome. Please include tests and keep the type-checking
+suite passing.

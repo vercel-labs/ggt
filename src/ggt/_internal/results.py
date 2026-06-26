@@ -1,20 +1,6 @@
-#
-# This source file is part of the EdgeDB open source project.
-#
-# Copyright 2008-present MagicStack Inc. and the EdgeDB authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# SPDX-PackageName: ggt
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
 
 # Warning: this file is ran in GHA tests/test-conclusion, with (almost) no
 # dependencies installed.
@@ -119,7 +105,7 @@ def exc_info_to_string(
     if callable(eits := getattr(test, "exc_info_to_string", None)):
         return eits(result, err)  # type: ignore [no-any-return]
     elif test is not None:
-        return unittest.TestResult._exc_info_to_string(result, err, test)  # type: ignore [attr-defined, no-any-return]
+        return unittest.TestResult._exc_info_to_string(result, err, test)  # type: ignore [attr-defined, no-any-return]  # ty: ignore[unresolved-attribute]
     else:
         lines = traceback.format_exception(err[0], value=err[1], tb=err[2])
         return "".join(lines)
@@ -299,7 +285,7 @@ def render_result(file: TextIO, result: TestResult) -> None:
 
 
 def _result_log_path(path_template: str) -> pathlib.Path | None:
-    ts = datetime.datetime.now(datetime.timezone.utc)
+    ts = datetime.datetime.now(datetime.UTC)
     now = ts.isoformat(sep="T", timespec="seconds").replace(":", "-")
     path = pathlib.Path(path_template.replace("%TIMESTAMP%", now))
 

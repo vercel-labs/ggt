@@ -1,28 +1,26 @@
 [project]
-name = "geltest"
-description = "Supercharged Python Unittest Runner for Gel"
+name = "ggt"
+dynamic = ["version"]
+description = "go-go test: make Python unittest go fast"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
-    { name = "Gel Data Inc.", email = "hello@geldata.com" },
-    { name = "Gel Contributors" },
+    { name = "ggt contributors" },
 ]
-version = "1.0.0"
-requires-python = ">=3.10.0"
+requires-python = ">=3.11.0"
 readme = "README.rst"
-license = { text = "Apache License, Version 2.0" }
-keywords = ["gel", "edgedb", "database", "test"]
+keywords = ["ggt", "unittest", "test", "parallel"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
-    "Operating System :: POSIX",
-    "Operating System :: MacOS :: MacOS X",
-    "Operating System :: Microsoft :: Windows",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Testing :: Unit",
 ]
@@ -35,19 +33,36 @@ dependencies = [
 [dependency-groups]
 # Typecheckers and linters must be pinned exactly
 # to avoid cqa breakage in CI.
-test = ['mypy==1.17.1', 'ruff==0.12.10']
+dev = [
+    "mypy==1.17.1",
+    "ruff==0.12.10",
+    "ty==0.0.52",
+    "uv==0.11.24",
+    "zizmor==1.26.1",
+]
 
 [project.urls]
-homepage = "https://www.geldata.com"
-source = "https://github.com/geldata/geltest"
-issues = "https://github.com/geldata/geltest/issues"
+homepage = "https://github.com/vercel-labs/ggt"
+source = "https://github.com/vercel-labs/ggt"
+issues = "https://github.com/vercel-labs/ggt/issues"
 
 [project.scripts]
-geltest = "geltest.__main__:_main"
+ggt = "ggt.__main__:_main"
 
 [build-system]
-requires = ["uv_build>=0.8.13,<0.9.0"]
-build-backend = "uv_build"
+requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+bump = true
+
+[tool.uv]
+default-groups = ["dev"]
 
 # ========================
 #          MYPY
@@ -64,7 +79,7 @@ exclude = [
     "^target",
 ]
 files = ["src/**/*.py"]
-python_version = "3.10"
+python_version = "3.11"
 follow_imports = "normal"
 strict = true
 ignore_errors = false
@@ -77,7 +92,7 @@ local_partial_types = true
 
 [tool.pyright]
 include = ["src/**"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "standard"
 
 # ========================
@@ -85,7 +100,7 @@ typeCheckingMode = "standard"
 # ========================
 [tool.black]
 line-length = 79
-target-version = ["py310"]
+target-version = ["py311"]
 
 # ========================
 #           RUFF
@@ -94,7 +109,7 @@ target-version = ["py310"]
 [tool.ruff]
 line-length = 79
 indent-width = 4
-target-version = "py310"
+target-version = "py311"
 exclude = [".github", ".git", "build", "dist", ".eggs"]
 
 [tool.ruff.lint]

@@ -32,5 +32,6 @@ docs/_build
 /wheelhouse
 /env*
 /.venv
+/.venv.*
 /uv.lock
 .dir-locals.el

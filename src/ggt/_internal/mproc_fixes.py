@@ -1,20 +1,6 @@
-#
-# This source file is part of the EdgeDB open source project.
-#
-# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# SPDX-PackageName: ggt
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
 
 
 from __future__ import annotations
@@ -66,7 +52,7 @@ def multiprocessing_pool_worker(
     # worker process, so the pool.worker() function is the
     # original unpatched version.
     try:
-        multiprocessing.pool.worker(  # type: ignore [attr-defined]
+        multiprocessing.pool.worker(  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
             inqueue, outqueue, initializer, *args, **kwargs
         )
     except KeyboardInterrupt:
@@ -135,16 +121,16 @@ def patch_multiprocessing(*, debug: bool) -> None:
     multiprocessing.set_start_method(method)
 
     # Add the ability to do clean shutdown of the worker.
-    multiprocessing.pool.worker = multiprocessing_pool_worker  # type: ignore [attr-defined]
+    multiprocessing.pool.worker = multiprocessing_pool_worker  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
 
     # Allow workers some time to shut down gracefully.
-    _orig_pool_worker_handler = multiprocessing.pool.Pool._handle_workers  # type: ignore [attr-defined]
-    multiprocessing.pool.Pool._handle_workers = multiprocessing_worker_handler  # type: ignore [attr-defined]
+    _orig_pool_worker_handler = multiprocessing.pool.Pool._handle_workers  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+    multiprocessing.pool.Pool._handle_workers = multiprocessing_worker_handler  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
 
     _orig_pool_join_exited_workers = (
-        multiprocessing.pool.Pool._join_exited_workers  # type: ignore [attr-defined]
+        multiprocessing.pool.Pool._join_exited_workers  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
     )
-    multiprocessing.pool.Pool._join_exited_workers = join_exited_workers  # type: ignore [attr-defined]
+    multiprocessing.pool.Pool._join_exited_workers = join_exited_workers  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
 
     patch_multiprocessing_reduction()
 

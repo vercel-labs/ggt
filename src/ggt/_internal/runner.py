@@ -1,20 +1,6 @@
-#
-# This source file is part of the EdgeDB open source project.
-#
-# Copyright 2017-present MagicStack Inc. and the EdgeDB authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# SPDX-PackageName: ggt
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
 
 # ruff: noqa: PLW0603
 
@@ -92,8 +78,8 @@ def teardown_suite() -> None:
     # references to tests being run, so we can think of
     # its methods as static.
     suite = StreamingTestSuite()
-    suite._tearDownPreviousClass(None, result)  # type: ignore[attr-defined]
-    suite._handleModuleTearDown(result)  # type: ignore[attr-defined]
+    suite._tearDownPreviousClass(None, result)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+    suite._handleModuleTearDown(result)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
 
 
 def init_worker(
@@ -116,8 +102,7 @@ def init_worker(
 
     result = ChannelingTestResult(result_queue)
 
-    os.environ["EDGEDB_TEST_PARALLEL"] = "1"
-    os.environ["GEL_TEST_PARALLEL"] = "1"
+    os.environ["GGT_PARALLEL"] = "1"
 
     coverage_run = cov.CoverageConfig.start_coverage_if_requested()
     py_hash_secret = cpython_state.get_py_hash_secret()
@@ -136,7 +121,7 @@ def shutdown_worker() -> None:
 class StreamingTestSuite(unittest.TestSuite):
     _cleanup = False
 
-    def run(  # type: ignore [override]
+    def run(  # type: ignore [override]  # ty: ignore[invalid-method-override]
         self,
         test: unittest.TestCase,
         result: ParallelTextTestResult | ChannelingTestResult,
@@ -169,16 +154,16 @@ class StreamingTestSuite(unittest.TestSuite):
         test: unittest.TestCase,
         result: ParallelTextTestResult | ChannelingTestResult,
     ) -> ParallelTextTestResult | ChannelingTestResult:
-        result._testRunEntered = True  # type: ignore [union-attr]
-        self._tearDownPreviousClass(test, result)  # type: ignore [attr-defined]
-        self._handleModuleFixture(test, result)  # type: ignore [attr-defined]
+        result._testRunEntered = True  # type: ignore [union-attr]  # ty: ignore[invalid-assignment]
+        self._tearDownPreviousClass(test, result)  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+        self._handleModuleFixture(test, result)  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
         previousClass = getattr(result, "_previousTestClass", None)
         currentClass = test.__class__
         if previousClass != currentClass:
             fixtures.import_global_fixture_data()
             fixtures.import_class_fixture_data(currentClass)
-        self._handleClassSetUp(test, result)  # type: ignore [attr-defined]
-        result._previousTestClass = currentClass  # type: ignore [union-attr]
+        self._handleClassSetUp(test, result)  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+        result._previousTestClass = currentClass  # type: ignore [union-attr]  # ty: ignore[invalid-assignment]
 
         if getattr(currentClass, "_classSetupFailed", False) or getattr(
             result, "_moduleSetUpFailed", False
@@ -200,7 +185,7 @@ class StreamingTestSuite(unittest.TestSuite):
 
         result.record_test_stats(test, {"running-time": elapsed})
 
-        result._testRunEntered = False  # type: ignore [union-attr]
+        result._testRunEntered = False  # type: ignore [union-attr]  # ty: ignore[invalid-assignment]
         return result
 
 
@@ -256,20 +241,20 @@ class _ExpectedFailure(NamedTuple):
 
 
 def _is_expecting_failure(test: object) -> _ExpectedFailure | None:
-    reason = getattr(test, "__et_xfail_reason__", None)
-    is_geltest_xfail = hasattr(test, "__et_xfail_reason__")
-    geltest_not_impl = getattr(test, "__et_xfail_not_implemented__", False)
-    geltest_xfail = getattr(test, "__et_xfail_allow_failure__", False)
-    geltest_xerror = getattr(test, "__et_xfail_allow_error__", False)
+    reason = getattr(test, "__ggt_xfail_reason__", None)
+    is_ggt_xfail = hasattr(test, "__ggt_xfail_reason__")
+    ggt_not_impl = getattr(test, "__ggt_xfail_not_implemented__", False)
+    ggt_xfail = getattr(test, "__ggt_xfail_allow_failure__", False)
+    ggt_xerror = getattr(test, "__ggt_xfail_allow_error__", False)
 
     unittest_xfail = getattr(test, "__unittest_expecting_failure__", False)
 
-    if unittest_xfail or geltest_not_impl or geltest_xfail or geltest_xerror:
+    if unittest_xfail or ggt_not_impl or ggt_xfail or ggt_xerror:
         return _ExpectedFailure(
             reason=reason,
-            not_implemented=geltest_not_impl,
-            expect_failure=geltest_xfail or unittest_xfail,
-            expect_error=geltest_xerror or not is_geltest_xfail,
+            not_implemented=ggt_not_impl,
+            expect_failure=ggt_xfail or unittest_xfail,
+            expect_error=ggt_xerror or not is_ggt_xfail,
         )
     else:
         return None
@@ -398,7 +383,7 @@ def _monitor_thread(
         for part in methname.split("."):
             method = getattr(method, part)
         assert callable(method)
-        method(*args, **kwargs)
+        method(*args, **kwargs)  # ty: ignore[call-top-callable]
 
 
 def status_thread_func(
@@ -429,7 +414,7 @@ class ParallelTestSuite(unittest.TestSuite):
         self.stop_requested = False
         self.worker_init = worker_init
 
-    def run(self, result: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]
+    def run(self, result: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]  # ty: ignore[invalid-method-override]
         # We use SimpleQueues because they are more predictable.
         # They do the necessary IO directly, without using a
         # helper thread.
@@ -499,7 +484,7 @@ class ParallelTestSuite(unittest.TestSuite):
                     )
                 ]
 
-                ar = pool.map_async(_run_test, items, chunksize=1)  # type: ignore [arg-type]
+                ar = pool.map_async(_run_test, items, chunksize=1)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
 
                 while True:
                     try:
@@ -513,7 +498,7 @@ class ParallelTestSuite(unittest.TestSuite):
                         # TODO: Should we look into using
                         # concurrent.futures.ProcessPoolExecutor
                         # instead?
-                        for p in pool._pool:  # type: ignore [attr-defined]
+                        for p in pool._pool:  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
                             if p.exitcode:
                                 if isinstance(result, ParallelTextTestResult):
                                     result.current_pids.get(p.pid)
@@ -556,7 +541,7 @@ class SequentialTestSuite(unittest.TestSuite):
         self.stop_requested = False
         self.worker_init = worker_init
 
-    def run(self, result_: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]
+    def run(self, result_: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]  # ty: ignore[invalid-method-override]
         global result
         result = result_
 
@@ -610,7 +595,7 @@ class BaseRenderer:
         }
 
     def format_test(self, test: unittest.TestCase) -> str:
-        if isinstance(test, unittest.case._SubTest):  # type: ignore [attr-defined]
+        if isinstance(test, unittest.case._SubTest):  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
             if hasattr(test, "params") and getattr(test, "params", None):
                 params = ", ".join(
                     f"{k}={v!r}"
@@ -1109,7 +1094,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
         err: results.OptExcInfo | None,
     ) -> None:
         if err is not None:
-            self.errors.append((subtest, self._exc_info_to_string(err, test)))
+            self.errors.append((subtest, self._exc_info_to_string(err, test)))  # ty: ignore[invalid-argument-type]
             self._mirrorOutput = True
 
             self.ren.report(
@@ -1259,7 +1244,7 @@ class ParallelTextTestRunner:
             )
             bootstrap_time_taken = time.monotonic() - session_start
 
-            os.environ["GEL_TEST_SETUP_RESPONSIBLE"] = "runner"
+            os.environ["GGT_TEST_SETUP_RESPONSIBLE"] = "runner"
 
             start = time.monotonic()
 
