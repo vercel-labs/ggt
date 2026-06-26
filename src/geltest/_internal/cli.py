@@ -399,12 +399,11 @@ def _run(
     total = 0
     total_unfiltered = 0
 
-    if verbosity > 0:
-
-        def progress_callback(n: int, unfiltered_n: int) -> None:
-            nonlocal total, total_unfiltered
-            total += n
-            total_unfiltered += unfiltered_n
+    def progress_callback(n: int, unfiltered_n: int) -> None:
+        nonlocal total, total_unfiltered
+        total += n
+        total_unfiltered += unfiltered_n
+        if verbosity > 0:
             click.echo(
                 styles.status(
                     f"Collected {total}/{total_unfiltered} tests.\r"
@@ -413,9 +412,7 @@ def _run(
                 err=list_tests,
             )
 
-        update_progress: Callable[[int, int], None] | None = progress_callback
-    else:
-        update_progress = None
+    update_progress: Callable[[int, int], None] | None = progress_callback
 
     if include_unsuccessful and result_log:
         unsuccessful = results.read_unsuccessful(result_log)
