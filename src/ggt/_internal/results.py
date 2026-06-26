@@ -22,20 +22,20 @@ import binascii
 import dataclasses
 import datetime
 import functools
+import glob
 import json
 import pathlib
+import shutil
 import sys
+import traceback
 import typing
 import unittest
-import glob
-import shutil
-import traceback
 import types
-
-import click
 
 if TYPE_CHECKING:
     from . import runner
+
+from . import console
 
 _T_co = TypeVar("_T_co", covariant=True)
 
@@ -189,7 +189,7 @@ def _get_term_width() -> int:
 
 
 def _echo(file: TextIO, s: str = "", **kwargs: Any) -> None:
-    click.secho(s, file=file, **kwargs)
+    console.secho(s, file=file, **kwargs)
 
 
 def _fill(file: TextIO, char: str, **kwargs: Any) -> None:

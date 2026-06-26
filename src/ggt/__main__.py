@@ -4,10 +4,9 @@
 
 
 def _main() -> None:
-    import click  # noqa: PLC0415
     from ggt._internal import cli  # noqa: PLC0415
 
-    click.command(cli.test)()
+    cli.main()
 
 
 if __name__ == "__main__":

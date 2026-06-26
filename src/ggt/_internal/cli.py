@@ -4,8 +4,8 @@
 
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, TextIO
 
+import argparse
 import contextlib
 import importlib.util
 import os
@@ -13,8 +13,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
-
-import click
+from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
     import coverage
@@ -24,22 +23,18 @@ else:
     except ImportError:
         coverage = None
 
-from .decorators import async_timeout
-from .decorators import not_implemented
-from .decorators import _xfail
-from .decorators import xfail
-from .decorators import xerror
-from .decorators import skip
-
-from . import cov
-from . import loader
-from . import mproc_fixes
-from . import runner
-from . import styles
-from . import results
+from . import console, cov, loader, mproc_fixes, results, runner, styles
+from .decorators import (
+    _xfail,
+    async_timeout,
+    not_implemented,
+    skip,
+    xerror,
+    xfail,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
 
 __all__ = (
@@ -52,127 +47,196 @@ __all__ = (
 )
 
 
-def _parse_key_value(
-    ctx: click.Context,
-    param: click.Parameter,
-    value: tuple[str, ...],
-) -> dict[str, str]:
-    result = {}
-    for item in value:
+class _KeyValueAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        item = values
+        if not isinstance(item, str):
+            raise argparse.ArgumentError(self, "expected key=value")
         if "=" not in item:
-            raise click.BadParameter(f"Expected format key=value, got: {item}")
+            raise argparse.ArgumentError(
+                self, f"Expected format key=value, got: {item}"
+            )
+
+        result = getattr(namespace, self.dest, None)
+        if result is None:
+            result = {}
+            setattr(namespace, self.dest, result)
         key, val = item.split("=", 1)
         result[key] = val
-    return result
 
 
-@click.argument("files", nargs=-1, metavar="[file or directory]...")
-@click.option("-v", "--verbose", is_flag=True, help="increase verbosity")
-@click.option("-q", "--quiet", is_flag=True, help="decrease verbosity")
-@click.option("--debug", is_flag=True, help="output internal debug logs")
-@click.option(
-    "--output-format",
-    type=click.Choice(runner.OutputFormat),
-    help="test progress output style",
-    default=runner.OutputFormat.auto,
-)
-@click.option(
-    "--warnings/--no-warnings",
-    help="enable or disable warnings (enabled by default)",
-    default=True,
-)
-@click.option(
-    "-j",
-    "--jobs",
-    type=int,
-    default=0,
-    help="number of parallel processes to use, default is 0, which "
-    "means choose automatically based on the number of "
-    "available CPU cores",
-)
-@click.option(
-    "-s",
-    "--shard",
-    type=str,
-    default="1/1",
-    help="run tests in shards (current/total)",
-)
-@click.option(
-    "-k",
-    "--include",
-    type=str,
-    multiple=True,
-    metavar="REGEXP",
-    help="only run tests which match the given regular expression",
-)
-@click.option(
-    "-e",
-    "--exclude",
-    type=str,
-    multiple=True,
-    metavar="REGEXP",
-    help="do not run tests which match the given regular expression",
-)
-@click.option(
-    "-x",
-    "--failfast",
-    is_flag=True,
-    help="stop tests after a first failure/error",
-)
-@click.option(
-    "--shuffle", is_flag=True, help="shuffle the order in which tests are run"
-)
-@click.option(
-    "--repeat",
-    type=int,
-    default=1,
-    help="repeat tests N times or until first unsuccessful run",
-)
-@click.option(
-    "--cov",
-    type=str,
-    multiple=True,
-    help="package name to measure code coverage for, "
-    "can be specified multiple times "
-    "(e.g --cov edb.common --cov edb.server)",
-)
-@click.option(
-    "--running-times-log",
-    "running_times_log_file",
-    type=click.File("a+"),
-    metavar="FILEPATH",
-    help="maintain a running time log file at FILEPATH",
-)
-@click.option(
-    "--result-log",
-    type=str,
-    metavar="FILEPATH",
-    help=(
-        "write the test result to a log file. If the path contains "
-        "%TIMESTAMP%, it will be replaced by ISO8601 date and time. "
-        "Empty string means not to write the log at all."
-    ),
-)
-@click.option(
-    "--include-unsuccessful",
-    is_flag=True,
-    help="include the tests that were not successful in the last run",
-)
-@click.option(
-    "--list", "list_tests", is_flag=True, help="list all the tests and exit"
-)
-@click.option(
-    "-X",
-    "--option",
-    type=str,
-    multiple=True,
-    callback=_parse_key_value,
-    help=(
-        "test suite specific option in key=value format, "
-        "e.g `test-db-cache=on` or `data-dir=/some/path`, "
-        "be specified multiple times"
-    ),
-)
+def _open_running_times_log(path: str | None) -> TextIO | None:
+    if path is None:
+        return None
+    return open(path, "a+", encoding="utf-8", newline="")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ggt",
+        description=(
+            "Run a test suite. Discovers and runs tests in the specified "
+            "files or directories. If no files or directories are specified, "
+            "current directory is assumed."
+        ),
+    )
+    parser.add_argument("files", nargs="*", metavar="[file or directory]")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="increase verbosity"
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="decrease verbosity"
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="output internal debug logs"
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=[fmt.value for fmt in runner.OutputFormat],
+        default=runner.OutputFormat.auto.value,
+        help="test progress output style",
+    )
+    parser.add_argument(
+        "--warnings",
+        dest="warnings",
+        action="store_true",
+        default=True,
+        help="enable warnings (enabled by default)",
+    )
+    parser.add_argument(
+        "--no-warnings",
+        dest="warnings",
+        action="store_false",
+        help="disable warnings",
+    )
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=0,
+        help=(
+            "number of parallel processes to use, default is 0, which "
+            "means choose automatically based on the number of "
+            "available CPU cores"
+        ),
+    )
+    parser.add_argument(
+        "-s",
+        "--shard",
+        type=str,
+        default="1/1",
+        help="run tests in shards (current/total)",
+    )
+    parser.add_argument(
+        "-k",
+        "--include",
+        type=str,
+        action="append",
+        default=[],
+        metavar="REGEXP",
+        help="only run tests which match the given regular expression",
+    )
+    parser.add_argument(
+        "-e",
+        "--exclude",
+        type=str,
+        action="append",
+        default=[],
+        metavar="REGEXP",
+        help="do not run tests which match the given regular expression",
+    )
+    parser.add_argument(
+        "-x",
+        "--failfast",
+        action="store_true",
+        help="stop tests after a first failure/error",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="shuffle the order in which tests are run",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="repeat tests N times or until first unsuccessful run",
+    )
+    parser.add_argument(
+        "--cov",
+        type=str,
+        action="append",
+        default=[],
+        help=(
+            "package name to measure code coverage for, "
+            "can be specified multiple times "
+            "(e.g --cov edb.common --cov edb.server)"
+        ),
+    )
+    parser.add_argument(
+        "--running-times-log",
+        dest="running_times_log_file",
+        metavar="FILEPATH",
+        help="maintain a running time log file at FILEPATH",
+    )
+    parser.add_argument(
+        "--result-log",
+        metavar="FILEPATH",
+        help=(
+            "write the test result to a log file. If the path contains "
+            "%%TIMESTAMP%%, it will be replaced by ISO8601 date and time. "
+            "Empty string means not to write the log at all."
+        ),
+    )
+    parser.add_argument(
+        "--include-unsuccessful",
+        action="store_true",
+        help="include the tests that were not successful in the last run",
+    )
+    parser.add_argument(
+        "--list",
+        dest="list_tests",
+        action="store_true",
+        help="list all the tests and exit",
+    )
+    parser.add_argument(
+        "-X",
+        "--option",
+        action=_KeyValueAction,
+        default=None,
+        metavar="OPTION",
+        help=(
+            "test suite specific option in key=value format, "
+            "e.g `test-db-cache=on` or `data-dir=/some/path`, "
+            "be specified multiple times"
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.output_format = runner.OutputFormat(args.output_format)
+    args.running_times_log_file = _open_running_times_log(
+        args.running_times_log_file
+    )
+    if args.option is None:
+        args.option = {}
+
+    try:
+        test(**vars(args))
+    finally:
+        if args.running_times_log_file is not None:
+            args.running_times_log_file.close()
+
+
 def test(
     *,
     files: list[str],
@@ -191,7 +255,7 @@ def test(
     repeat: int,
     running_times_log_file: TextIO | None,
     list_tests: bool,
-    result_log: str,
+    result_log: str | None,
     include_unsuccessful: bool,
     option: dict[str, str],
 ) -> None:
@@ -202,7 +266,7 @@ def test(
     """
     if quiet:
         if verbose:
-            click.secho(
+            console.secho(
                 "Warning: both --quiet and --verbose are "
                 "specified, assuming --quiet.",
                 fg="yellow",
@@ -219,14 +283,14 @@ def test(
     mproc_fixes.patch_multiprocessing(debug=debug)
 
     if verbosity > 1 and output_format is runner.OutputFormat.stacked:
-        click.secho(
+        console.secho(
             "Error: cannot use stacked output format in verbose mode.",
             fg="red",
         )
         sys.exit(1)
 
     if repeat < 1:
-        click.secho(
+        console.secho(
             "Error: --repeat must be a positive non-zero number.", fg="red"
         )
         sys.exit(1)
@@ -236,7 +300,7 @@ def test(
         if os.path.exists(os.path.join(cwd, "tests")):
             files = ["tests"]
         else:
-            click.secho(
+            console.secho(
                 'Error: no test path specified and no "tests" directory found',
                 fg="red",
             )
@@ -244,17 +308,19 @@ def test(
 
     for file in files:
         if not os.path.exists(file):
-            click.secho(f"Error: test path {file!r} does not exist", fg="red")
+            console.secho(
+                f"Error: test path {file!r} does not exist", fg="red"
+            )
             sys.exit(1)
 
     try:
         selected_shard, total_shards = map(int, shard.split("/"))
-    except Exception:
-        click.secho(f"Error: --shard {shard} must match format e.g. 2/5")
+    except ValueError:
+        console.secho(f"Error: --shard {shard} must match format e.g. 2/5")
         sys.exit(1)
 
     if selected_shard < 1 or selected_shard > total_shards:
-        click.secho(f"Error: --shard {shard} is out of bound")
+        console.secho(f"Error: --shard {shard} is out of bound")
         sys.exit(1)
 
     def run() -> int:
@@ -281,7 +347,7 @@ def test(
     if cov:
         for pkg in cov:
             if "\\" in pkg or "/" in pkg or pkg.endswith(".py"):
-                click.secho(
+                console.secho(
                     f"Error: --cov argument {pkg!r} looks like a path, "
                     f"expected a Python package name",
                     fg="red",
@@ -318,7 +384,7 @@ def _find_pyproject_toml(path: pathlib.Path) -> pathlib.Path:
 @contextlib.contextmanager
 def _coverage_wrapper(paths: list[str]) -> Iterator[None]:
     if coverage is None:
-        click.secho(
+        console.secho(
             'Error: "coverage" package is missing, cannot run tests with --cov'
         )
         sys.exit(1)
@@ -355,7 +421,7 @@ def _coverage_wrapper(paths: list[str]) -> Iterator[None]:
                 data_file=covfile,
             )
             report_cov.load()
-            click.secho("Coverage:")
+            console.secho("Coverage:")
             report_cov.report()
             # store the coverage file in cwd, so it can be used to produce
             # additional reports with coverage cli
@@ -378,7 +444,7 @@ def _run(
     total_shards: int,
     running_times_log_file: TextIO | None,
     list_tests: bool,
-    result_log: str,
+    result_log: str | None,
     include_unsuccessful: bool,
     options: dict[str, str],
 ) -> int:
@@ -390,7 +456,7 @@ def _run(
         total += n
         total_unfiltered += unfiltered_n
         if verbosity > 0:
-            click.echo(
+            console.echo(
                 styles.status(
                     f"Collected {total}/{total_unfiltered} tests.\r"
                 ),
@@ -406,7 +472,7 @@ def _run(
 
     for file in files:
         if not os.path.exists(file) and verbosity > 0:
-            click.echo(
+            console.echo(
                 styles.warning(f"Warning: {file}: no such file or directory.")
             )
 
@@ -419,26 +485,28 @@ def _run(
     )
 
     if list_tests:
-        click.echo(err=True)
+        console.echo(err=True)
         cases = loader.get_test_cases([suite])
         for test_group in cases.values():
             for test in test_group:
-                click.echo(str(test))
+                console.echo(str(test))
         return 0
 
     jobs = max(min(total, jobs), 1)
 
     if verbosity > 0:
-        click.echo()
+        console.echo()
         if jobs > 1:
-            click.echo(
+            console.echo(
                 styles.status(f"Using up to {jobs} processes to run tests.")
             )
 
     result = None
     for rnum in range(repeat):
         if repeat > 1:
-            click.echo(styles.status(f"Repeat #{rnum + 1} out of {repeat}."))
+            console.echo(
+                styles.status(f"Repeat #{rnum + 1} out of {repeat}.")
+            )
 
         test_runner = runner.ParallelTextTestRunner(
             verbosity=verbosity,

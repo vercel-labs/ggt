@@ -453,7 +453,6 @@ Requirements
 ============
 
 - Python 3.11+
-- click >= 8.1.0
 - coverage >= 7.4
 - typing-extensions >= 4.14.0
 

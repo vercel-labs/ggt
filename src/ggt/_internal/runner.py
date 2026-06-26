@@ -39,10 +39,9 @@ import unittest.result
 import unittest.signals
 import warnings
 
-import click
-
 from . import cov
 from . import cpython_state
+from . import console
 from . import fixtures
 from . import loader
 from . import mproc_fixes
@@ -647,7 +646,7 @@ class SimpleRenderer(BaseRenderer):
         *,
         currently_running: Sequence[unittest.TestCase],
     ) -> None:
-        click.echo(
+        console.echo(
             self.styles_map[marker.value](marker.value),
             nl=False,
             file=self.stream,
@@ -695,7 +694,7 @@ class VerboseRenderer(BaseRenderer):
         currently_running: Sequence[unittest.TestCase],
     ) -> None:
         style = self.styles_map[marker.value]
-        click.echo(
+        console.echo(
             style(self._render_test(test, marker, description)),
             file=self.stream,
         )
@@ -703,7 +702,7 @@ class VerboseRenderer(BaseRenderer):
     def report_still_running(self, still_running: dict[str, float]) -> None:
         items = [f"{t} for {d:.02f}s" for t, d in still_running.items()]
         newline_join = "\n   "
-        click.echo(f"still running:\n  {newline_join.join(items)}")
+        console.echo(f"still running:\n  {newline_join.join(items)}")
 
 
 class MultiLineRenderer(BaseRenderer):
@@ -938,7 +937,7 @@ class MultiLineRenderer(BaseRenderer):
         # Hide cursor.
         print("\033[?25l", end="", flush=True, file=self.stream)
         try:
-            # Use `print` (not `click.echo`) because we want to
+            # Use `print` because we want to
             # precisely control when the output is flushed.
             print(clear_cmd + "\n".join(lines), flush=False, file=self.stream)
         finally:
@@ -1200,7 +1199,7 @@ class ParallelTextTestRunner:
         self.failfast = failfast
         self.shuffle = shuffle
         self.output_format = output_format
-        self.ui = styles.ClickUI(verbosity=verbosity, stream=self.stream)
+        self.ui = styles.ConsoleUI(verbosity=verbosity, stream=self.stream)
         self.options = {**options} if options is not None else {}
 
     def run(
@@ -1320,7 +1319,7 @@ class ParallelTextTestRunner:
 
     def _echo(self, s: str = "", **kwargs: Any) -> None:
         if self.verbosity > 0:
-            click.secho(s, file=self.stream, **kwargs)
+            console.secho(s, file=self.stream, **kwargs)
 
     def _sort_tests(
         self,

@@ -4,14 +4,14 @@
 
 
 from __future__ import annotations
-from typing import Any, TextIO
-from typing_extensions import TypeAliasType
-from collections.abc import Callable
 
 import sys
+from collections.abc import Callable
+from typing import Any, TextIO
 
-import click
+from typing_extensions import TypeAliasType
 
+from . import console
 
 Style = TypeAliasType("Style", Callable[[str], str])
 
@@ -21,15 +21,15 @@ def marker_passed(t: str) -> str:
 
 
 def marker_errored(t: str) -> str:
-    return click.style(t, fg="red", bold=True)
+    return console.style(t, fg="red", bold=True, file=sys.stderr)
 
 
 def marker_skipped(t: str) -> str:
-    return click.style(t, fg="yellow")
+    return console.style(t, fg="yellow", file=sys.stderr)
 
 
 def marker_failed(t: str) -> str:
-    return click.style(t, fg="red", bold=True)
+    return console.style(t, fg="red", bold=True, file=sys.stderr)
 
 
 def marker_xfailed(t: str) -> str:
@@ -41,18 +41,18 @@ def marker_not_implemented(t: str) -> str:
 
 
 def marker_upassed(t: str) -> str:
-    return click.style(t, fg="yellow")
+    return console.style(t, fg="yellow", file=sys.stderr)
 
 
 def status(t: str) -> str:
-    return click.style(t, fg="white", bold=True)
+    return console.style(t, fg="white", bold=True, file=sys.stderr)
 
 
 def warning(t: str) -> str:
-    return click.style(t, fg="yellow")
+    return console.style(t, fg="yellow", file=sys.stderr)
 
 
-class ClickUI:
+class ConsoleUI:
     def __init__(
         self, verbosity: int = 1, stream: TextIO = sys.stderr
     ) -> None:
@@ -61,7 +61,9 @@ class ClickUI:
 
     def _echo(self, msg: str = "", **kwargs: Any) -> None:
         if self._verbosity > 0:
-            click.secho(msg, file=self._stream, **({"nl": False} | kwargs))
+            console.secho(
+                msg, file=self._stream, **({"nl": False} | kwargs)
+            )
 
     def text(self, msg: str) -> None:
         if self._verbosity > 1:
@@ -74,4 +76,4 @@ class ClickUI:
         self._echo(msg, fg="yellow")
 
     def error(self, msg: str) -> None:
-        self._echo(msg, fg="read")
+        self._echo(msg, fg="red")
