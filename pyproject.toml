@@ -102,6 +102,14 @@ pythonVersion = "3.11"
 typeCheckingMode = "standard"
 
 # ========================
+#            TY
+# ========================
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = ["fixtures"]
+
+# ========================
 #          BLACK
 # ========================
 [tool.black]

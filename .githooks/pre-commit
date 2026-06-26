@@ -1,0 +1,11 @@
+#!/bin/sh
+
+set -e
+
+if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1; then
+  exit 0
+fi
+
+ROOT=$(git rev-parse --show-toplevel)
+
+"$ROOT/scripts/run-index-checks.sh"

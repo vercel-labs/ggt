@@ -24,8 +24,8 @@ jobs:
       - run: uv sync --dev
       - run: uv run --dev ruff format --check src tests
       - run: uv run --dev ruff check src/ggt pyproject.toml
-      - run: uv run --dev mypy src/ggt
-      - run: uv run --dev ty check src tests
+      - run: uv run --dev mypy
+      - run: uv run --dev ty check
       - run: uv run --dev zizmor .github/workflows
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

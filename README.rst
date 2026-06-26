@@ -488,6 +488,36 @@ Optional dependencies:
 
 - coverage >= 7.4
 
+Git Hooks
+=========
+
+Install the repository hooks with:
+
+.. code-block:: bash
+
+   scripts/install-hooks.sh
+
+This sets ``core.hooksPath`` to ``.githooks``.
+
+The pre-commit hook checks the staged index, not unstaged working-tree files.
+It creates a temporary checkout from the Git index and runs:
+
+.. code-block:: bash
+
+   ruff format --check src tests
+   ruff check src/ggt pyproject.toml
+   ggt tests --output-format simple
+
+The pre-push hook runs broader checks against the working tree:
+
+.. code-block:: bash
+
+   uv run --dev --no-sync ruff format --check src tests
+   uv run --dev --no-sync ruff check src/ggt pyproject.toml
+   uv run --dev --no-sync mypy
+   uv run --dev --no-sync ty check
+   uv run --dev --no-sync ggt tests --output-format simple
+
 License
 =======
 
