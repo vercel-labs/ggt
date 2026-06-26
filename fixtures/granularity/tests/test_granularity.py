@@ -3,14 +3,16 @@
 import os
 import pathlib
 import unittest
+import uuid
 
 
 EVENTS = pathlib.Path(os.environ["GGT_FUNCTIONAL_EVENTS"])
 
 
 def event(name):
-    with EVENTS.open("a", encoding="utf-8") as f:
-        f.write(name + "\n")
+    EVENTS.mkdir(parents=True, exist_ok=True)
+    event_file = EVENTS / f"{os.getpid()}-{uuid.uuid4().hex}.txt"
+    event_file.write_text(name, encoding="utf-8")
 
 
 class SuiteGranularity(unittest.TestCase):

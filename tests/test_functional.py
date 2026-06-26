@@ -568,7 +568,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_parallel_granularity_sorting_modes(self) -> None:
         self.use_fixture("granularity")
-        events = self.project / "granularity-events.txt"
+        events = self.project / "granularity-events"
         result = await self.run_ggt(
             "tests/test_granularity.py",
             "-j2",
@@ -579,8 +579,11 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.skip_if_multiprocessing_blocked(result)
         await self.assert_success(result)
         self.assertIn("tests ran: 6", result.output)
+        event_names = [
+            path.read_text(encoding="utf-8") for path in events.glob("*.txt")
+        ]
         self.assertEqual(
-            sorted(events.read_text(encoding="utf-8").splitlines()),
+            sorted(event_names),
             [
                 "default-a",
                 "default-b",
