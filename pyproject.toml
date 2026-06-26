@@ -42,6 +42,7 @@ test = [
 # Typecheckers and linters must be pinned exactly
 # to avoid cqa breakage in CI.
 check = [
+    "coverage>=7.4",
     "mypy==1.17.1",
     "ruff==0.12.10",
     "ty==0.0.52",
