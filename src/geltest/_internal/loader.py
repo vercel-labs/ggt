@@ -23,6 +23,7 @@ from typing_extensions import TypeAliasType
 from collections.abc import Mapping
 
 import contextlib
+import contextvars
 import heapq
 import importlib
 import importlib.machinery
@@ -472,6 +473,13 @@ def _restore_TestCase(
         setstate(state)
     elif isinstance(state, dict):
         test.__dict__.update(state)
+
+    if isinstance(test, unittest.IsolatedAsyncioTestCase):
+        test.__dict__.setdefault("_asyncioRunner", None)
+        test.__dict__.setdefault(
+            "_asyncioTestContext",
+            contextvars.copy_context(),
+        )
 
     return test
 
