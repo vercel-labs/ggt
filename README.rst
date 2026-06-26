@@ -1,12 +1,12 @@
 ================================================
-ggt - go-go test -- make Python unittest go fast 
+ggt - go-go test -- make Python unittest go fast
 ================================================
 
 `ggt` is a `unittest` runner for Python that runs tests in parallel with the
 ability to run and share test setup.  `ggt` also provides a `pytest`-like CLI
-to run tests with some useful test selection and running features.  
+to run tests with some useful test selection and running features.
 
-There is no runtim bloat or magic, it's standard `unittest` underneath,
+There is no runtime bloat or magic, it's standard `unittest` underneath,
 which makes running tests with `ggt` *fast*.
 
 Quick Start
@@ -15,7 +15,7 @@ Quick Start
 Basic Usage
 -----------
 
-Run all tests in the current directory:
+Run tests from the default ``tests/`` directory:
 
 .. code-block:: bash
 
@@ -103,24 +103,27 @@ Test Selection
 Output and Reporting
 --------------------
 
-``--output-format [auto|simple|stacked|verbose]``
+``--output-format [auto|simple|stacked|verbose|silent]``
    Control test progress output style:
 
    - ``auto``: Automatically choose based on terminal capabilities
    - ``simple``: Simple dot notation (like standard unittest)
    - ``stacked``: Rich progress display with module grouping
    - ``verbose``: Detailed output for each test
+   - ``silent``: Suppress progress output while still printing the final
+     result summary
 
 ``--warnings/--no-warnings``
    Enable or disable warning capture and reporting (enabled by default).
 
 ``--result-log FILEPATH``
    Write test results to a JSON log file. Use ``%TIMESTAMP%`` for automatic
-   timestamping.
+   timestamping. Result logs include outcome details and timing fields such
+   as ``setup_time_taken`` and ``tests_time_taken``.
 
 ``--running-times-log FILEPATH``
    Maintain a CSV file tracking test execution times for performance
-   analysis.
+   analysis and shard balancing.
 
 ``-X, --option KEY=VALUE``
    Test suite specific options in key-value format. Can be specified multiple
@@ -154,7 +157,8 @@ Advanced Options
 
 ``--cov PACKAGE``
    Enable code coverage reporting for the specified package. Can be used
-   multiple times. Enable coverage support with
+   multiple times. ``PACKAGE`` must be an importable package name, not a file
+   path. Enable coverage support with
    ``uv add --dev ggt[coverage]`` or
    ``python -m pip install 'ggt[coverage]'``.
 
@@ -216,6 +220,18 @@ Basic Fixture Example:
            """Configure fixture from command-line options"""
            if 'database-url' in options:
                self.database_url = options['database-url']
+
+       def get_shared_data(self):
+           """Return JSON-serializable data for worker processes"""
+           return None
+
+       def set_shared_data(self, data):
+           """Receive shared data in worker processes"""
+           pass
+
+       async def post_session_set_up(self, cases, *, ui):
+           """Called after test class setup is complete"""
+           pass
 
    class MyTestCase(unittest.TestCase):
        database = DatabaseFixture()
@@ -317,14 +333,19 @@ Detailed output for each individual test:
    failed
    test_async_operation (tests.test_queries.TestQueries): OK
 
+Silent Format
+-------------
+Suppress progress output and print only the final summary, failures, errors,
+and warnings.
+
 Performance and Optimization
 ============================
 
 Parallel Execution
 ------------------
 
-ggt automatically detects the optimal number of worker processes based
-on your CPU cores. You can override this:
+ggt automatically detects a worker count based on your CPU cores. You can
+override this:
 
 .. code-block:: bash
 
@@ -366,7 +387,8 @@ Distribute tests across multiple CI jobs using sharding:
    # Job 2 of 4
    ggt -s 2/4
 
-ggt intelligently distributes tests to balance load across shards.
+ggt uses test and setup timing data from ``--running-times-log`` when
+available to balance load across shards.
 
 Integration
 ===========
@@ -388,8 +410,8 @@ Example GitHub Actions configuration:
          matrix:
            shard: [1, 2, 3, 4]
        steps:
-         - uses: actions/checkout@v3
-         - uses: actions/setup-python@v4
+         - uses: actions/checkout@v5
+         - uses: actions/setup-python@v5
            with:
              python-version: '3.11'
          - run: pip install ggt
@@ -397,7 +419,7 @@ Example GitHub Actions configuration:
              ggt -s ${{ matrix.shard }}/4 \
                --result-log results-${{ matrix.shard }}.json \
                -X test-cache=on -X timeout=300
-         - uses: actions/upload-artifact@v3
+         - uses: actions/upload-artifact@v4
            with:
              name: test-results
              path: results-*.json
@@ -415,6 +437,9 @@ This integrates with the ``coverage`` package to provide detailed code
 coverage analysis. Enable coverage support with
 ``uv add --dev ggt[coverage]`` or
 ``python -m pip install 'ggt[coverage]'`` to use this option.
+
+The coverage report is written to the console and a ``.coverage`` data file is
+left in the working directory for follow-up ``coverage`` commands.
 
 Option Integration
 ------------------
@@ -462,8 +487,6 @@ Requirements
 Optional dependencies:
 
 - coverage >= 7.4
-
-The package is compatible with CPython on Linux, macOS, and Windows.
 
 License
 =======
