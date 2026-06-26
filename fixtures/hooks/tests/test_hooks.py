@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import uuid
 import unittest
 
 
@@ -11,9 +12,10 @@ EVENTS = pathlib.Path(os.environ["GGT_FUNCTIONAL_EVENTS"])
 
 
 def event(name, **data):
-    with EVENTS.open("a", encoding="utf-8") as f:
-        payload = json.dumps({"event": name, **data}, sort_keys=True)
-        f.write(payload + "\n")
+    EVENTS.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"event": name, **data}, sort_keys=True)
+    event_file = EVENTS / f"{os.getpid()}-{uuid.uuid4().hex}.json"
+    event_file.write_text(payload, encoding="utf-8")
 
 
 class SharedFixture:

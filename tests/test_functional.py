@@ -527,7 +527,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
     async def test_class_hooks_fixtures_options_and_parallel_shared_data(
         self,
     ) -> None:
-        events = self.project / "events.jsonl"
+        events = self.project / "events"
         self.use_fixture("hooks")
         result = await self.run_ggt(
             "tests/test_hooks.py",
@@ -542,8 +542,8 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_success(result)
 
         entries = [
-            json.loads(line)
-            for line in events.read_text(encoding="utf-8").splitlines()
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in events.glob("*.json")
         ]
         names = [entry["event"] for entry in entries]
         self.assertEqual(names.count("fixture_setup"), 1)
