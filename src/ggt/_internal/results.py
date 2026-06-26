@@ -116,7 +116,7 @@ class TestResult:
     was_successful: bool
 
     testsRun: int
-    boot_time_taken: float
+    setup_time_taken: float
     tests_time_taken: float
 
     # negative
@@ -136,7 +136,7 @@ def _combine_test_results(a: TestResult, b: TestResult) -> TestResult:
         was_successful=a.was_successful and b.was_successful,
         testsRun=a.testsRun + b.testsRun,
         # this assumes each result comes from a parallel run
-        boot_time_taken=max(a.boot_time_taken, b.boot_time_taken),
+        setup_time_taken=max(a.setup_time_taken, b.setup_time_taken),
         # this assumes each result comes from a parallel run
         tests_time_taken=max(a.tests_time_taken, b.tests_time_taken),
         # negative
@@ -153,13 +153,13 @@ def _combine_test_results(a: TestResult, b: TestResult) -> TestResult:
 
 def collect_result_data(
     r: runner.ParallelTextTestResult,
-    boot_time_taken: float,
+    setup_time_taken: float,
     tests_time_taken: float,
 ) -> TestResult:
     return TestResult(
         was_successful=r.wasSuccessful(),
         testsRun=r.testsRun,
-        boot_time_taken=boot_time_taken,
+        setup_time_taken=setup_time_taken,
         tests_time_taken=tests_time_taken,
         failures=[_collect_case_data(r, t, e) for t, e in r.failures],
         errors=[_collect_case_data(r, t, e) for t, e in r.errors],
@@ -266,18 +266,18 @@ def render_result(file: TextIO, result: TestResult) -> None:
     # running times
     _echo(file)
     _echo(file, "Running times: ")
-    if result.boot_time_taken > 0.0:
-        _echo(file, "  bootstrap: ", nl=False)
-        _echo(file, _format_time(result.boot_time_taken), bold=True)
+    if result.setup_time_taken > 0.0:
+        _echo(file, "  setup: ", nl=False)
+        _echo(file, _format_time(result.setup_time_taken), bold=True)
 
     _echo(file, "  tests: ", nl=False)
     _echo(file, _format_time(result.tests_time_taken), bold=True)
 
-    if result.boot_time_taken > 0.0:
+    if result.setup_time_taken > 0.0:
         _echo(file, "  total: ", nl=False)
         _echo(
             file,
-            _format_time(result.boot_time_taken + result.tests_time_taken),
+            _format_time(result.setup_time_taken + result.tests_time_taken),
             bold=True,
         )
 
@@ -368,6 +368,9 @@ def _dataclass_from_dict(
         raise ValueError(f"expected a dict of a dataclass, found {type(data)}")
 
     field_types = typing.get_type_hints(cls)
+    if cls is TestResult and "boot_time_taken" in data:
+        data = dict(data)
+        data["setup_time_taken"] = data.pop("boot_time_taken")
     return cls(
         **{
             k: _dataclass_from_dict(field_types.get(k), v)
@@ -376,9 +379,7 @@ def _dataclass_from_dict(
     )
 
 
-# if this file is invoked directly
-if __name__ == "__main__":
-    # read result JSON files, concat them into a single result and render
+def _main() -> None:
     result_path_glob = sys.argv[1]
 
     results: list[TestResult] = []
@@ -399,3 +400,12 @@ if __name__ == "__main__":
 
     render_result(sys.stdout, result)
     sys.exit(0 if result.was_successful else 1)
+
+
+# if this file is invoked directly
+if __name__ == "__main__":
+    # read result JSON files, concat them into a single result and render
+    from . import cov
+
+    with cov.CoverageConfig.enable_coverage_if_requested():
+        _main()

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import importlib.util
 import json
 import os
 import pathlib
@@ -72,8 +71,6 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         env: dict[str, str] | None = None,
     ) -> RunResult:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
             "ggt",
             *args,
             cwd=cwd or self.project,
@@ -112,6 +109,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             (["-X", "missing-equals"], "Expected format key=value"),
             (["--repeat", "0"], "--repeat must be"),
             (["--shard", "bad"], "must match format"),
+            (["--shard", "2/1"], "is out of bound"),
             (["missing.py"], "does not exist"),
             (["--cov", "pkg/path", "tests"], "looks like a path"),
         ]
@@ -121,6 +119,24 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.run_ggt(*args)
                 await self.assert_failure(result)
                 self.assertIn(expected, result.output)
+
+    async def test_no_path_without_tests_directory_fails(self) -> None:
+        empty = self.project / "empty"
+        empty.mkdir()
+        result = await self.run_ggt(cwd=empty)
+        await self.assert_failure(result)
+        self.assertIn('no "tests" directory found', result.output)
+
+    async def test_verbose_stacked_is_rejected(self) -> None:
+        self.use_fixture("basic")
+        result = await self.run_ggt(
+            "tests/test_basic.py",
+            "-v",
+            "--output-format",
+            "stacked",
+        )
+        await self.assert_failure(result)
+        self.assertIn("cannot use stacked output format", result.output)
 
     async def test_no_path_defaults_to_tests_directory(self) -> None:
         self.use_fixture("basic")
@@ -161,6 +177,45 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_success(by_package)
         self.assertIn("tests ran: 1", by_package.output)
 
+    async def test_repeated_include_and_exclude_filters(self) -> None:
+        self.use_fixture("basic")
+        result = await self.run_ggt(
+            "tests/test_basic.py",
+            "-k",
+            "pass_a",
+            "-k",
+            "select_me",
+            "-e",
+            "pass_b",
+            "-e",
+            "exclude_me",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 2", result.output)
+
+    async def test_fixture_projects_are_directly_runnable(self) -> None:
+        cases = [
+            ("fixtures/basic/tests", "tests ran: 5"),
+            ("fixtures/modes/tests", "tests ran: 4"),
+            ("fixtures/pkg/tests", "tests ran: 1"),
+        ]
+
+        for path, expected in cases:
+            with self.subTest(path=path):
+                result = await self.run_ggt(
+                    path,
+                    "-j1",
+                    "--output-format",
+                    "simple",
+                    cwd=REPO_ROOT,
+                    env=self.env(),
+                )
+                await self.assert_success(result)
+                self.assertIn(expected, result.output)
+
     async def test_result_log_classifies_outcomes(self) -> None:
         log = self.project / "result.json"
         self.use_fixture("outcomes")
@@ -177,14 +232,55 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
 
         data = json.loads(log.read_text(encoding="utf-8"))
         self.assertFalse(data["was_successful"])
-        self.assertEqual(data["testsRun"], 9)
+        self.assertEqual(data["testsRun"], 12)
         self.assertEqual(len(data["failures"]), 2)
-        self.assertEqual(len(data["errors"]), 1)
+        self.assertEqual(len(data["errors"]), 2)
         self.assertEqual(len(data["skipped"]), 1)
-        self.assertEqual(len(data["expected_failures"]), 2)
+        self.assertEqual(len(data["expected_failures"]), 3)
         self.assertEqual(len(data["not_implemented"]), 1)
         self.assertEqual(len(data["unexpected_successes"]), 1)
         self.assertEqual(len(data["warnings"]), 1)
+
+    async def test_parallel_result_log_classifies_outcomes(self) -> None:
+        log = self.project / "parallel-result.json"
+        self.use_fixture("outcomes")
+
+        result = await self.run_ggt(
+            "tests/test_outcomes.py",
+            "-j2",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_failure(result)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(data["testsRun"], 12)
+        self.assertEqual(len(data["failures"]), 2)
+        self.assertEqual(len(data["errors"]), 2)
+        self.assertEqual(len(data["expected_failures"]), 3)
+        self.assertEqual(len(data["warnings"]), 1)
+
+    async def test_result_log_timestamp_and_no_warnings(self) -> None:
+        self.use_fixture("outcomes")
+        log_template = str(self.project / "logs" / "result-%%TIMESTAMP%%.json")
+        result = await self.run_ggt(
+            "tests/test_outcomes.py",
+            "-j1",
+            "--no-warnings",
+            "--result-log",
+            log_template,
+            "--output-format",
+            "silent",
+        )
+        await self.assert_failure(result)
+
+        logs = sorted((self.project / "logs").glob("result-*.json"))
+        self.assertEqual(len(logs), 1)
+        data = json.loads(logs[0].read_text(encoding="utf-8"))
+        self.assertEqual(data["warnings"], [])
 
     async def test_include_unsuccessful_uses_previous_result_log(self) -> None:
         log = self.project / "logs" / "result.json"
@@ -272,6 +368,132 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_failure(stopped)
         self.assertIn("tests ran: 1", stopped.output)
 
+    async def test_repeat_named_tests_are_ordered_after_first_runs(
+        self,
+    ) -> None:
+        self.use_fixture("edgecases")
+        result = await self.run_ggt(
+            "tests/test_repeat_names.py",
+            "-j1",
+            "--list",
+        )
+        await self.assert_success(result)
+        lines = [
+            line for line in result.stdout.splitlines() if "test_" in line
+        ]
+        self.assertEqual(
+            [line.split()[0] for line in lines],
+            ["test_alpha", "test_beta", "test_zREPEAT_alpha"],
+        )
+
+    async def test_sharding_with_setup_scripts_and_timing_stats(self) -> None:
+        self.use_fixture("sharding")
+        times = self.project / "shard-times.csv"
+        times.write_text(
+            "setup::db-a,0.01,1\n"
+            "setup::unknown,0.02,1\n"
+            "test_a_1 (tests.test_sharding.SetupShardA.test_a_1),0.01,1\n",
+            encoding="utf-8",
+        )
+        counts: list[int] = []
+
+        for shard in ["1/3", "2/3", "3/3"]:
+            result = await self.run_ggt(
+                "tests/test_sharding.py",
+                "-j1",
+                "--shard",
+                shard,
+                "--running-times-log",
+                str(times),
+                "--output-format",
+                "simple",
+            )
+            await self.assert_success(result)
+            counts.extend(
+                int(line.rpartition(" ")[2])
+                for line in result.output.splitlines()
+                if "tests ran:" in line
+            )
+
+        self.assertEqual(len(counts), 3)
+        self.assertTrue(all(count > 0 for count in counts))
+        timing_text = times.read_text(encoding="utf-8")
+        self.assertIn("setup::db-a", timing_text)
+        self.assertIn("test_a_1", timing_text)
+
+        cached = await self.run_ggt(
+            "tests/test_sharding.py",
+            "-j1",
+            "--shard",
+            "2/3",
+            "--running-times-log",
+            str(times),
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(cached)
+
+    async def test_subtest_failure_is_reported_as_error(self) -> None:
+        self.use_fixture("edgecases")
+        log = self.project / "subtests.json"
+        result = await self.run_ggt(
+            "tests/test_subtests.py",
+            "-j1",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "verbose",
+        )
+        await self.assert_failure(result)
+        self.assertIn("test_subtests_fail_as_error", result.output)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(data["testsRun"], 2)
+        self.assertEqual(len(data["errors"]), 1)
+        self.assertIn("value=2", data["errors"][0]["id"])
+
+    async def test_server_context_and_cancelled_timeout_are_reported(
+        self,
+    ) -> None:
+        self.use_fixture("edgecases")
+        log = self.project / "context.json"
+        result = await self.run_ggt(
+            "tests/test_error_context.py",
+            "-j1",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "simple",
+        )
+        await self.assert_failure(result)
+        self.assertIn("server-side context", result.output)
+        self.assertIn("timeout after 1", result.output)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(len(data["errors"]), 1)
+        self.assertEqual(len(data["failures"]), 1)
+        self.assertTrue(
+            any(case["server_traceback"] for case in data["errors"])
+        )
+
+    async def test_class_setup_error_and_teardown_warning(self) -> None:
+        self.use_fixture("edgecases")
+        events = self.project / "setup-events.txt"
+        result = await self.run_ggt(
+            "tests/test_setup_error.py",
+            "-j1",
+            "-X",
+            "mode=broken",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+        )
+        await self.assert_failure(result)
+        self.assertIn("setup broke", result.output)
+
+        event_lines = events.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(event_lines[:2], ["options:broken", "setup"])
+
     async def test_output_formats_smoke(self) -> None:
         self.use_fixture("basic")
         for fmt in ["simple", "verbose", "stacked", "silent"]:
@@ -286,6 +508,21 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("SUCCESS", result.output)
                 if fmt == "verbose":
                     self.assertIn("test_pass_a", result.output)
+
+    async def test_quiet_verbose_and_shuffle_smoke(self) -> None:
+        self.use_fixture("modes")
+        result = await self.run_ggt(
+            "tests/test_modes.py",
+            "--quiet",
+            "--verbose",
+            "--shuffle",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("both --quiet and --verbose", result.output)
+        self.assertNotIn("SUCCESS", result.output)
 
     async def test_class_hooks_fixtures_options_and_parallel_shared_data(
         self,
@@ -317,31 +554,115 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fixture_import", names)
         self.assertIn("class_import", names)
 
+    async def test_parallel_pickling_restores_testcase_variants(self) -> None:
+        self.use_fixture("pickle")
+        result = await self.run_ggt(
+            "tests/test_pickle_cases.py",
+            "-j2",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 5", result.output)
+
+    async def test_parallel_granularity_sorting_modes(self) -> None:
+        self.use_fixture("granularity")
+        events = self.project / "granularity-events.txt"
+        result = await self.run_ggt(
+            "tests/test_granularity.py",
+            "-j2",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 6", result.output)
+        self.assertEqual(
+            sorted(events.read_text(encoding="utf-8").splitlines()),
+            [
+                "default-a",
+                "default-b",
+                "suite-a",
+                "suite-b",
+                "system-a",
+                "system-b",
+            ],
+        )
+
+    async def test_still_running_status_is_reported(self) -> None:
+        self.use_fixture("slow")
+        result = await self.run_ggt(
+            "tests/test_slow.py",
+            "-j2",
+            "--output-format",
+            "verbose",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("still running", result.output)
+
+    async def test_parallel_failfast_stops_after_first_failure(self) -> None:
+        self.use_fixture("failfast")
+        result = await self.run_ggt(
+            "tests/test_failfast.py",
+            "-j2",
+            "--failfast",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_failure(result)
+        self.assertIn("test_1_fail", result.output)
+        self.assertIn("failures: 1", result.output)
+
+    async def test_results_module_renders_combined_logs(self) -> None:
+        self.use_fixture("outcomes")
+        logs = self.project / "logs"
+        result = await self.run_ggt(
+            "tests/test_outcomes.py",
+            "-j1",
+            "--result-log",
+            str(logs / "a.json"),
+            "--output-format",
+            "silent",
+        )
+        await self.assert_failure(result)
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "ggt._internal.results",
+            str(logs / "*.json"),
+            cwd=self.project,
+            env=self.env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(
+            proc.returncode,
+            1,
+            stdout.decode("utf-8", "replace")
+            + stderr.decode("utf-8", "replace"),
+        )
+        self.assertIn("FAILURE", stdout.decode("utf-8", "replace"))
+
     async def test_coverage_success_and_missing_coverage_message(self) -> None:
         self.use_fixture("samplepkg")
 
-        if importlib.util.find_spec("coverage") is None:
-            result = await self.run_ggt(
-                "tests/test_samplepkg.py",
-                "-j1",
-                "--cov",
-                "samplepkg",
-                "--output-format",
-                "simple",
-            )
-            self.assertIn("--cov requires coverage support", result.output)
-        else:
-            result = await self.run_ggt(
-                "tests/test_samplepkg.py",
-                "-j1",
-                "--cov",
-                "samplepkg",
-                "--output-format",
-                "simple",
-            )
-            await self.assert_success(result)
-            self.assertIn("Coverage:", result.output)
-            self.assertTrue((self.project / ".coverage").exists())
+        result = await self.run_ggt(
+            "tests/test_samplepkg.py",
+            "-j1",
+            "--cov",
+            "samplepkg",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("Coverage:", result.output)
+        self.assertTrue((self.project / ".coverage").exists())
 
         blocker = self.project / "block_coverage"
         self.write(

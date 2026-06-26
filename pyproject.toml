@@ -40,6 +40,7 @@ dev = [
     "coverage>=7.4",
     "mypy==1.17.1",
     "ruff==0.12.10",
+    "time-machine>=2.16",
     "ty==0.0.52",
     "uv==0.11.24",
     "zizmor==1.26.1",

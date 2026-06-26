@@ -1226,7 +1226,7 @@ class ParallelTextTestRunner:
             stats,
         )
         worker_init = None
-        bootstrap_time_taken = 0.0
+        setup_time_taken = 0.0
         tests_time_taken = 0.0
         result: ParallelTextTestResult | None = None
         setup_stats: fixtures.Stats = []
@@ -1241,7 +1241,7 @@ class ParallelTextTestRunner:
                     options=self.options,
                 )
             )
-            bootstrap_time_taken = time.monotonic() - session_start
+            setup_time_taken = time.monotonic() - session_start
 
             os.environ["GGT_TEST_SETUP_RESPONSIBLE"] = "runner"
 
@@ -1314,7 +1314,7 @@ class ParallelTextTestRunner:
                 self._echo()
 
         return results.collect_result_data(
-            result, bootstrap_time_taken, tests_time_taken
+            result, setup_time_taken, tests_time_taken
         )
 
     def _echo(self, s: str = "", **kwargs: Any) -> None:

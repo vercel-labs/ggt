@@ -9,6 +9,10 @@ from ggt._internal.cli import async_timeout, not_implemented
 from ggt._internal.cli import skip, xerror, xfail
 
 
+def emit_duplicate_warning():
+    warnings.warn("careful", UserWarning)
+
+
 class Outcomes(unittest.IsolatedAsyncioTestCase):
     def test_failure(self):
         self.fail("planned failure")
@@ -32,6 +36,14 @@ class Outcomes(unittest.IsolatedAsyncioTestCase):
     def test_expected_error(self):
         raise RuntimeError("expected")
 
+    @xfail("error is not an expected failure")
+    def test_mismatch_xfail_error(self):
+        raise RuntimeError("not an assertion")
+
+    @xerror("failure is not an expected error")
+    def test_mismatch_xerror_failure(self):
+        self.fail("not an error")
+
     @not_implemented("todo")
     def test_not_implemented(self):
         self.fail("todo")
@@ -41,4 +53,7 @@ class Outcomes(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(2)
 
     def test_warning(self):
-        warnings.warn("careful", UserWarning)
+        emit_duplicate_warning()
+
+    def test_warning_duplicate(self):
+        emit_duplicate_warning()

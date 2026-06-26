@@ -232,8 +232,8 @@ async def _call_session_phase(
         for case in eligible:
             await callback(test_case=case, stats=stats, options=options, ui=ui)
     else:
-        # Use a semaphore to limit the concurrency of bootstrap
-        # tasks to the number of jobs (bootstrap is heavy, having
+        # Use a semaphore to limit the concurrency of setup
+        # tasks to the number of jobs (setup is heavy, having
         # more tasks than `--jobs` won't necessarily make
         # things faster.)
         sem = asyncio.BoundedSemaphore(num_jobs)
