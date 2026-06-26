@@ -125,11 +125,14 @@ def patch_multiprocessing(*, debug: bool) -> None:
     if debug:
         multiprocessing.util.log_to_stderr(logging.DEBUG)
 
-    # A "fork" without "exec" is broken on macOS since 10.14:
+    # A plain "fork" without "exec" is broken on macOS since 10.14:
     # https://www.wefearchange.org/2018/11/forkmacos.rst.html
-    # Since there is no apparent benefit of using fork for
-    # the test workers, use the "spawn" method on all platforms.
-    multiprocessing.set_start_method("spawn")
+    # Prefer "forkserver" when available: it keeps the safer clean-server
+    # fork model while avoiding most of the per-worker import overhead of
+    # "spawn". Fall back to "spawn" on platforms that do not support it.
+    methods = multiprocessing.get_all_start_methods()
+    method = "forkserver" if "forkserver" in methods else "spawn"
+    multiprocessing.set_start_method(method)
 
     # Add the ability to do clean shutdown of the worker.
     multiprocessing.pool.worker = multiprocessing_pool_worker  # type: ignore [attr-defined]
