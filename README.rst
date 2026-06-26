@@ -154,7 +154,9 @@ Advanced Options
 
 ``--cov PACKAGE``
    Enable code coverage reporting for the specified package. Can be used
-   multiple times.
+   multiple times. Enable coverage support with
+   ``uv add --dev ggt[coverage]`` or
+   ``python -m pip install 'ggt[coverage]'``.
 
 
 Test Decorators and Fixtures
@@ -410,7 +412,9 @@ Generate coverage reports alongside your tests:
    ggt --cov myproject --cov myproject.submodule
 
 This integrates with the ``coverage`` package to provide detailed code
-coverage analysis.
+coverage analysis. Enable coverage support with
+``uv add --dev ggt[coverage]`` or
+``python -m pip install 'ggt[coverage]'`` to use this option.
 
 Option Integration
 ------------------
@@ -453,8 +457,11 @@ Requirements
 ============
 
 - Python 3.11+
-- coverage >= 7.4
 - typing-extensions >= 4.14.0
+
+Optional dependencies:
+
+- coverage >= 7.4
 
 The package is compatible with CPython on Linux, macOS, and Windows.
 

@@ -4,9 +4,11 @@
 
 
 def _main() -> None:
+    from ggt._internal import cov  # noqa: PLC0415
     from ggt._internal import cli  # noqa: PLC0415
 
-    cli.main()
+    with cov.CoverageConfig.enable_coverage_if_requested():
+        cli.main()
 
 
 if __name__ == "__main__":

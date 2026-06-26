@@ -16,7 +16,7 @@ import tempfile
 from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
-    import coverage
+    coverage: Any | None
 else:
     try:
         import coverage
@@ -45,6 +45,9 @@ __all__ = (
     "xerror",
     "xfail",
 )
+
+
+_COVERAGE_EXTRA = "ggt[coverage]"
 
 
 class _KeyValueAction(argparse.Action):
@@ -168,16 +171,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="repeat tests N times or until first unsuccessful run",
     )
+    cov_help = (
+        "package name to measure code coverage for, "
+        "can be specified multiple times "
+        "(e.g --cov myproject --cov myproject.submodule)"
+    )
+    if coverage is None:
+        cov_help += (
+            f" (WARNING: coverage support is not enabled; use `uv add --dev "
+            f"{_COVERAGE_EXTRA}` or `python -m pip install "
+            f"'{_COVERAGE_EXTRA}'`)"
+        )
+
     parser.add_argument(
         "--cov",
         type=str,
         action="append",
         default=[],
-        help=(
-            "package name to measure code coverage for, "
-            "can be specified multiple times "
-            "(e.g --cov edb.common --cov edb.server)"
-        ),
+        help=cov_help,
     )
     parser.add_argument(
         "--running-times-log",
@@ -280,6 +291,24 @@ def test(
     if jobs == 0:
         jobs = os.cpu_count() or 1
 
+    for pkg in cov:
+        if "\\" in pkg or "/" in pkg or pkg.endswith(".py"):
+            console.secho(
+                f"Error: --cov argument {pkg!r} looks like a path, "
+                f"expected a Python package name",
+                fg="red",
+            )
+            sys.exit(1)
+
+    if cov and coverage is None:
+        console.secho(
+            "Error: --cov requires coverage support.\n"
+            f"Enable it with: uv add --dev {_COVERAGE_EXTRA}\n"
+            f"Or install it with: python -m pip install '{_COVERAGE_EXTRA}'",
+            fg="red",
+        )
+        sys.exit(1)
+
     mproc_fixes.patch_multiprocessing(debug=debug)
 
     if verbosity > 1 and output_format is runner.OutputFormat.stacked:
@@ -345,15 +374,6 @@ def test(
         )
 
     if cov:
-        for pkg in cov:
-            if "\\" in pkg or "/" in pkg or pkg.endswith(".py"):
-                console.secho(
-                    f"Error: --cov argument {pkg!r} looks like a path, "
-                    f"expected a Python package name",
-                    fg="red",
-                )
-                sys.exit(1)
-
         with _coverage_wrapper(cov):
             result = run()
     else:
@@ -383,12 +403,7 @@ def _find_pyproject_toml(path: pathlib.Path) -> pathlib.Path:
 
 @contextlib.contextmanager
 def _coverage_wrapper(paths: list[str]) -> Iterator[None]:
-    if coverage is None:
-        console.secho(
-            'Error: "coverage" package is missing, cannot run tests with --cov'
-        )
-        sys.exit(1)
-
+    assert coverage is not None
     cov_rc = _find_pyproject_toml(_modules_parent_path(paths))
 
     with tempfile.TemporaryDirectory() as td:
@@ -504,9 +519,7 @@ def _run(
     result = None
     for rnum in range(repeat):
         if repeat > 1:
-            console.echo(
-                styles.status(f"Repeat #{rnum + 1} out of {repeat}.")
-            )
+            console.echo(styles.status(f"Repeat #{rnum + 1} out of {repeat}."))
 
         test_runner = runner.ParallelTextTestRunner(
             verbosity=verbosity,

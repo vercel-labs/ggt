@@ -3,15 +3,14 @@
 # SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, NamedTuple
 
 import contextlib
 import json
 import os
 import os.path
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
-    import coverage
     from collections.abc import Iterator
 
 
@@ -40,7 +39,7 @@ class CoverageConfig(NamedTuple):
             return cls.from_json(config)
 
     @classmethod
-    def new_custom_coverage_object(cls, **conf: Any) -> coverage.Coverage:
+    def new_custom_coverage_object(cls, **conf: Any) -> Any:
         import coverage  # noqa: PLC0415
 
         cov = coverage.Coverage(**conf)
@@ -51,7 +50,7 @@ class CoverageConfig(NamedTuple):
 
         return cov
 
-    def new_coverage_object(self) -> coverage.Coverage:
+    def new_coverage_object(self) -> Any:
         return self.new_custom_coverage_object(
             config_file=self.config,
             source=self.paths,
@@ -59,7 +58,7 @@ class CoverageConfig(NamedTuple):
         )
 
     @classmethod
-    def start_coverage_if_requested(cls) -> coverage.Coverage | None:
+    def start_coverage_if_requested(cls) -> Any | None:
         cov_config = cls.from_environ()
         if cov_config is not None:
             cov = cov_config.new_coverage_object()

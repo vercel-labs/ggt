@@ -25,14 +25,19 @@ classifiers = [
     "Topic :: Software Development :: Testing :: Unit",
 ]
 dependencies = [
-    'coverage >= 7.4',
     'typing-extensions >= 4.14.0',
+]
+
+[project.optional-dependencies]
+coverage = [
+    'coverage >= 7.4',
 ]
 
 [dependency-groups]
 # Typecheckers and linters must be pinned exactly
 # to avoid cqa breakage in CI.
 dev = [
+    "coverage>=7.4",
     "mypy==1.17.1",
     "ruff==0.12.10",
     "ty==0.0.52",
@@ -75,6 +80,7 @@ exclude = [
     "^build",
     "^dist",
     "^docs",
+    "^fixtures",
     "^target",
 ]
 files = ["src/**/*.py"]

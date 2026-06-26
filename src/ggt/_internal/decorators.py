@@ -4,18 +4,18 @@
 
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 import asyncio
 import functools
-import unittest
 import logging
+import unittest
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
-logger = logging.getLogger("edb.test")
+logger = logging.getLogger("ggt.test")
 skip = unittest.skip
 
 _P = ParamSpec("_P")

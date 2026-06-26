@@ -61,9 +61,7 @@ class ConsoleUI:
 
     def _echo(self, msg: str = "", **kwargs: Any) -> None:
         if self._verbosity > 0:
-            console.secho(
-                msg, file=self._stream, **({"nl": False} | kwargs)
-            )
+            console.secho(msg, file=self._stream, **({"nl": False} | kwargs))
 
     def text(self, msg: str) -> None:
         if self._verbosity > 1:
