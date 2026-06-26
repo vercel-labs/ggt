@@ -25,7 +25,7 @@ cp -R fixtures "$test_root/fixtures"
 uv run \
     --no-cache \
     --only-group=test \
-    --locked \
+    --frozen \
     --isolated \
     --with "$wheel_path" \
     python -m unittest discover -s "$test_root/tests"
