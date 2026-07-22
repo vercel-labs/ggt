@@ -20,6 +20,7 @@ from typing_extensions import TypeAliasType
 import asyncio
 import collections
 import csv
+import gc
 import dataclasses
 import enum
 import faulthandler
@@ -55,7 +56,8 @@ if TYPE_CHECKING:
 _ConnArgs = TypeAliasType("_ConnArgs", dict[str, Any])
 
 _WorkerParam = TypeAliasType(
-    "_WorkerParam", tuple[_ConnArgs | None, str | None, str | None]
+    "_WorkerParam",
+    tuple[_ConnArgs | None, str | None, str | None, dict[str, str]],
 )
 
 _ResultCall = TypeAliasType(
@@ -89,7 +91,18 @@ def init_worker(
 ) -> None:
     global result, coverage_run, py_hash_secret, py_random_seed
 
+    # The fork server (and therefore this worker) may have inherited
+    # a disabled collector from the preload warm-up; see
+    # ggt._internal.preload.
+    gc.enable()
+
     faulthandler.enable(file=sys.stderr, all_threads=True)
+
+    # The fork server's environment snapshot predates test discovery,
+    # so runner state (shared fixture data in particular) travels
+    # through the parameter queue instead of the environment.
+    _conn_args, _server_ver, _backend_dsn, ggt_env = param_queue.get()
+    os.environ.update(ggt_env)
 
     if additional_init:
         additional_init()
@@ -460,13 +473,6 @@ class ParallelTestSuite(unittest.TestSuite):
             multiprocessing.SimpleQueue()
         )
 
-        # Prepopulate the worker param queue with server connection
-        # information.
-        for _ in range(self.num_workers):
-            worker_param_queue.put(
-                (self.server_conn_args, self.server_ver, self.backend_dsn)
-            )
-
         result_thread = threading.Thread(
             name="test-monitor",
             target=_monitor_thread,
@@ -496,6 +502,27 @@ class ParallelTestSuite(unittest.TestSuite):
             initializer=mproc_fixes.WorkerScope(init_worker, shutdown_worker),
             initargs=initargs,
         )
+
+        # Feed the workers their parameters: server connection
+        # information and the runner's environment (the fork server's
+        # own environment snapshot predates discovery, so shared
+        # fixture data must travel through the queue).  This happens
+        # after pool creation because the payload can exceed the pipe
+        # buffer: the workers must already be draining the queue.
+        ggt_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.startswith("GGT_")
+        }
+        for _ in range(self.num_workers):
+            worker_param_queue.put(
+                (
+                    self.server_conn_args,
+                    self.server_ver,
+                    self.backend_dsn,
+                    ggt_env,
+                )
+            )
 
         # Wait for all workers to initialize.
         for _ in range(self.num_workers):
