@@ -48,8 +48,10 @@ from . import console
 from . import fixtures
 from . import loader
 from . import mproc_fixes
+from . import pytest_compat
 from . import styles
 from . import results
+from .pytest_compat import fixtures as pytest_fixtures
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Iterator
@@ -83,6 +85,11 @@ def teardown_suite() -> None:
     suite = StreamingTestSuite()
     suite._tearDownPreviousClass(None, result)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     suite._handleModuleTearDown(result)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+
+    if pytest_compat.is_enabled():
+        # Tear down any remaining pytest-style fixtures (session
+        # scope in particular).
+        pytest_fixtures.teardown_session()
 
 
 def init_worker(
@@ -1268,6 +1275,16 @@ class ParallelTextTestResult(unittest.result.TestResult):
         self.report_progress(test, marker, reason)
 
     def addUnexpectedSuccess(self, test: unittest.TestCase) -> None:
+        method = getattr(test, test._testMethodName, None)
+        if getattr(method, "__ggt_xfail_strict__", False):
+            # pytest.mark.xfail(strict=True): an unexpected pass is a
+            # hard failure.
+            reason = getattr(method, "__ggt_xfail_reason__", None) or ""
+            self.addFailure(
+                test,
+                f"AssertionError: [XPASS(strict)] {reason}".rstrip(),  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
+            )
+            return
         super().addUnexpectedSuccess(test)
         self.report_progress(test, Markers.upassed)
 
@@ -1349,7 +1366,9 @@ class ParallelTextTestRunner:
             self.verbosity,
             stats,
         )
-        worker_init = None
+        worker_init = (
+            pytest_compat.worker_init if pytest_compat.is_enabled() else None
+        )
         setup_time_taken = 0.0
         tests_time_taken = 0.0
         result: ParallelTextTestResult | None = None

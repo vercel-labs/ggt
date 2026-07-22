@@ -52,17 +52,27 @@ async def setup_test_cases(
 ) -> Stats:
     fixture_data: dict[str, object] = {}
     fixtures: list[loader.Fixture] = []
+    shared_data: dict[loader.Fixture, object] = {}
 
     ui.info("Setting up global test prerequisites... ")
-    for case, attr, fixture in _collect_global_fixtures(cases):
+    for _case, _attr, fixture in _collect_global_fixtures(cases):
         if options is not None:
             fixture.set_options(options)
         await fixture.set_up(ui)
         data = fixture.get_shared_data()
         if data is not None:
+            shared_data[fixture] = data
+            fixtures.append(fixture)
+
+    # Export the shared data under every (class, attribute) that
+    # references the fixture: workers import an arbitrary subset of the
+    # test modules and must be able to find the data through any one
+    # of them.
+    for case, attr, fixture in _iter_global_fixture_occurrences(cases):
+        data = shared_data.get(fixture)
+        if data is not None:
             key = f"{case.__module__}.{case.__qualname__}:{attr}"
             fixture_data[key] = data
-            fixtures.append(fixture)
 
     ui.info("\nSetting up test classes ")
     stats = await _call_session_phase(
@@ -214,6 +224,23 @@ def _collect_global_fixtures(
                 seen.add(attr)
                 origin = next(c for c in case.__mro__ if name in c.__dict__)
                 yield origin, name, attr  # ty: ignore[invalid-yield]
+
+
+def _iter_global_fixture_occurrences(
+    cases: Iterable[type[unittest.TestCase | loader.GGTProto]],
+) -> Iterator[
+    tuple[
+        type[unittest.TestCase | loader.GGTProto],
+        str,
+        loader.Fixture,
+    ]
+]:
+    """Like _collect_global_fixtures, but yields every occurrence."""
+    for case in cases:
+        for name in dir(case):
+            attr = inspect.getattr_static(case, name, None)
+            if isinstance(attr, loader.Fixture):
+                yield case, name, attr
 
 
 async def _call_session_phase(

@@ -169,6 +169,13 @@ def _preload() -> None:
     # long-lived object graph (see gc.freeze docs).
     gc.disable()
 
+    # Test modules in the list must be imported through the
+    # assertion-rewriting hook, exactly as workers would import them.
+    from . import pytest_compat  # noqa: PLC0415
+
+    if pytest_compat.is_enabled():
+        pytest_compat.install_assertion_rewriting()
+
     for entry in modules:
         try:
             name, _origin = entry

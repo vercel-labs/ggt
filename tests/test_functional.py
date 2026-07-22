@@ -685,6 +685,490 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("FAILURE", stdout.decode("utf-8", "replace"))
 
+    async def test_pytest_compat_discovery_and_listing(self) -> None:
+        self.use_fixture("pytestcompat")
+        listed = await self.run_ggt("ptests", "--list")
+        await self.assert_success(listed)
+
+        self.assertIn("test_simple_pass", listed.stdout)
+        self.assertIn("test_with_helper", listed.stdout)
+        self.assertIn("test_suffix_discovery", listed.stdout)
+        self.assertIn("TestGroup::test_group_one", listed.stdout)
+        self.assertIn("TestLifecycle::test_lifecycle_one", listed.stdout)
+        self.assertIn("test_module_hook_ran", listed.stdout)
+        self.assertIn("test_plain_unittest", listed.stdout)
+        self.assertIn("TestClassFixtures::test_class_fixture", listed.stdout)
+
+        self.assertIn("test_async_collected", listed.stdout)
+
+        self.assertNotIn("test_not_collected", listed.stdout)
+        self.assertNotIn("test_with_init_not_collected", listed.stdout)
+
+    async def test_pytest_compat_sequential_run(self) -> None:
+        events = self.project / "pytest-events.txt"
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "ptests",
+            "-j1",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 17", result.output)
+        self.assertIn(
+            "conftest-imported",
+            events.read_text(encoding="utf-8"),
+        )
+
+    async def test_pytest_compat_parallel_run(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "ptests",
+            "-j2",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 17", result.output)
+
+    async def test_pytest_compat_filtering(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "ptests",
+            "-k",
+            "group",
+            "-e",
+            "group_two",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 1", result.output)
+
+    async def test_pytest_compat_can_be_disabled(self) -> None:
+        self.use_fixture("pytestcompat")
+        # Without pytest compatibility, a test directory without
+        # __init__.py files is not discoverable by unittest.
+        result = await self.run_ggt("ptests", "--no-pytest", "-j1")
+        await self.assert_failure(result)
+
+    async def test_pytest_compat_shared_fixtures_run_once_in_parent(
+        self,
+    ) -> None:
+        events = self.project / "shared-events.txt"
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "shared",
+            "-j2",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 5", result.output)
+        self.assertIn("could not be pickled", result.output)
+
+        recorded = events.read_text(encoding="utf-8").splitlines()
+        # Session- and module-scoped fixtures execute exactly once (in
+        # the runner process) even with two workers and two modules
+        # using them.
+        self.assertEqual(recorded.count("session-setup"), 1)
+        self.assertEqual(recorded.count("session-teardown"), 1)
+        self.assertEqual(recorded.count("module-a-setup"), 1)
+        # The unpickleable fixture ran in the parent and then again in
+        # the worker that executed its test.
+        self.assertEqual(recorded.count("unpickleable-setup"), 2)
+
+    async def test_pytest_compat_shared_fixtures_sequential(self) -> None:
+        events = self.project / "shared-events-seq.txt"
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "shared",
+            "-j1",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 5", result.output)
+
+        recorded = events.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(recorded.count("session-setup"), 1)
+        self.assertEqual(recorded.count("session-teardown"), 1)
+        self.assertEqual(recorded.count("module-a-setup"), 1)
+        # In sequential mode the parent is also the test process, so
+        # the cached value is reused directly.
+        self.assertEqual(recorded.count("unpickleable-setup"), 1)
+
+    async def test_pytest_compat_async_tests_and_fixtures(self) -> None:
+        events = self.project / "async-events.txt"
+        log = self.project / "async-result.json"
+        self.use_fixture("pytestcompat")
+
+        result = await self.run_ggt(
+            "asynctests",
+            "-j1",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 10", result.output)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(len(data["skipped"]), 1)
+        self.assertEqual(len(data["expected_failures"]), 1)
+        self.assertEqual(len(data["failures"]), 0)
+        self.assertEqual(len(data["errors"]), 0)
+
+        recorded = events.read_text(encoding="utf-8").splitlines()
+        # The async generator fixture's teardown ran, in the test's
+        # own event loop, exactly once.
+        self.assertEqual(recorded.count("agen-teardown"), 1)
+
+    async def test_pytest_compat_async_parallel(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "asynctests",
+            "-j2",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 10", result.output)
+
+    async def test_pytest_compat_parametrized_fixtures(self) -> None:
+        log = self.project / "fparams-result.json"
+        self.use_fixture("pytestcompat")
+
+        listed = await self.run_ggt("fparams", "--list")
+        await self.assert_success(listed)
+        self.assertIn("test_number_is_positive[1]", listed.stdout)
+        self.assertIn("test_number_is_positive[3]", listed.stdout)
+        self.assertIn("test_letter[bee]", listed.stdout)
+        self.assertIn("test_cross[1-ten]", listed.stdout)
+        self.assertIn("test_cross[2-twenty]", listed.stdout)
+        self.assertIn("test_mod_param_one[x]", listed.stdout)
+        self.assertIn("test_doubled_through_chain[2]", listed.stdout)
+
+        result = await self.run_ggt(
+            "fparams",
+            "-j1",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 20", result.output)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        # pytest.param("c", marks=skip) inside fixture params.
+        self.assertEqual(len(data["skipped"]), 1)
+        self.assertEqual(len(data["failures"]), 0)
+        self.assertEqual(len(data["errors"]), 0)
+
+    async def test_pytest_compat_parametrized_fixtures_parallel(
+        self,
+    ) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "fparams",
+            "-j2",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 20", result.output)
+
+    async def test_pytest_compat_extras(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "extras",
+            "-j1",
+            "-X",
+            "color=blue",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 12", result.output)
+        # The inert conftest plugin hook is reported.
+        self.assertIn("ignoring: pytest_collection_modifyitems", result.output)
+        # capsys.disabled() writes to the real stdout.
+        self.assertIn("GGT-DISABLED-MARKER", result.output)
+
+    async def test_pytest_compat_mark_selection(self) -> None:
+        self.use_fixture("pytestcompat")
+
+        cases = [
+            ("slow", 2),
+            ("slow and not integration", 1),
+            ("not slow", 10),
+        ]
+        for expr, expected in cases:
+            with self.subTest(expr=expr):
+                result = await self.run_ggt(
+                    "extras",
+                    "-m",
+                    expr,
+                    "-X",
+                    "color=blue",
+                    "-j1",
+                    "--output-format",
+                    "simple",
+                )
+                await self.assert_success(result)
+                self.assertIn(f"tests ran: {expected}", result.output)
+
+        invalid = await self.run_ggt("extras", "-m", "slow ==")
+        await self.assert_failure(invalid)
+        self.assertIn("invalid mark expression", invalid.output)
+
+    async def test_pytest_compat_ini_options(self) -> None:
+        self.use_fixture("pytestcompat")
+        project = self.project / "iniopts"
+
+        listed = await self.run_ggt("--list", cwd=project)
+        await self.assert_success(listed)
+        self.assertIn("check_usefixtures_applied", listed.stdout)
+        self.assertIn("CheckGroup::check_method", listed.stdout)
+        self.assertNotIn("test_not_collected", listed.stdout)
+        self.assertNotIn("check_never", listed.stdout)
+
+        result = await self.run_ggt(
+            "-j1",
+            "--output-format",
+            "simple",
+            cwd=project,
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 3", result.output)
+
+    async def test_pytest_compat_conftest_beyond_package_root(self) -> None:
+        # Fixtures from a conftest.py above a non-package directory
+        # must be visible (the conftest walk is bounded by the
+        # rootdir, not the sys.path root).
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "nested",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 1", result.output)
+
+    async def test_pytest_compat_anyio_backends(self) -> None:
+        self.use_fixture("pytestcompat")
+
+        listed = await self.run_ggt("anyiotests", "--list")
+        await self.assert_success(listed)
+        self.assertIn("test_backend_matches[asyncio]", listed.stdout)
+        self.assertIn("test_backend_matches[trio]", listed.stdout)
+        # Sync tests are not expanded by a module-level anyio mark.
+        self.assertIn("test_sync_not_duplicated (", listed.stdout)
+        self.assertNotIn("test_sync_not_duplicated[", listed.stdout)
+
+        result = await self.run_ggt(
+            "anyiotests",
+            "anyiodefault",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        # anyiotests: 3 async tests x 2 backends + 1 sync + 1
+        # hypothesis-wrapped async test x 2 backends;
+        # anyiodefault: 1 async test x 2 backends (builtin default).
+        self.assertIn("tests ran: 11", result.output)
+
+    async def test_pytest_compat_anyio_parallel(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "anyiotests",
+            "-j2",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 9", result.output)
+
+    async def test_pytest_compat_marks(self) -> None:
+        log = self.project / "marks-result.json"
+        self.use_fixture("pytestcompat")
+
+        listed = await self.run_ggt("marks", "--list")
+        await self.assert_success(listed)
+        self.assertIn("test_parametrized[1-2]", listed.stdout)
+        self.assertIn("test_parametrized[three]", listed.stdout)
+        self.assertIn("test_parametrized_stacked[a-1]", listed.stdout)
+        self.assertIn("test_method_parametrized[2]", listed.stdout)
+
+        result = await self.run_ggt(
+            "marks",
+            "-j1",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "simple",
+        )
+        # The strict xfail that passes must fail the run.
+        await self.assert_failure(result)
+        self.assertIn("XPASS(strict)", result.output)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(data["testsRun"], 22)
+        self.assertEqual(len(data["skipped"]), 4)
+        self.assertEqual(len(data["expected_failures"]), 4)
+        self.assertEqual(len(data["failures"]), 1)
+        self.assertEqual(len(data["errors"]), 0)
+        self.assertEqual(len(data["unexpected_successes"]), 0)
+
+    async def test_pytest_compat_marks_parallel(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "marks",
+            "-j2",
+            "--output-format",
+            "simple",
+            "-e",
+            "strict_passes",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("tests ran: 21", result.output)
+
+    async def test_pytest_compat_assertion_rewriting_and_capsys(
+        self,
+    ) -> None:
+        self.use_fixture("pytestcompat")
+        log = self.project / "asserts-result.json"
+
+        result = await self.run_ggt(
+            "asserts",
+            "-j1",
+            "--result-log",
+            str(log),
+            "--output-format",
+            "simple",
+        )
+        await self.assert_failure(result)
+        # pytest-style assertion introspection in the test module...
+        self.assertIn("assert [1, 2] == [1, 3]", result.output)
+        self.assertIn("At index 1 diff: 2 != 3", result.output)
+        # ... and in conftest.py helpers.
+        self.assertIn("assert 'left' == 'right'", result.output)
+
+        data = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(data["testsRun"], 3)
+        # capsys passed; the two assertion demos failed.
+        self.assertEqual(len(data["failures"]), 2)
+        self.assertEqual(len(data["errors"]), 0)
+
+    async def test_pytest_compat_rewrite_cache(self) -> None:
+        self.use_fixture("pytestcompat")
+        args = ["asserts", "-j1", "--output-format", "simple"]
+
+        cold = await self.run_ggt(*args)
+        await self.assert_failure(cold)
+        self.assertIn("At index 1 diff: 2 != 3", cold.output)
+
+        cache_files = list(
+            (self.project / "asserts" / "__pycache__").glob("*-ggt-*.pyc")
+        )
+        self.assertTrue(cache_files)
+
+        warm = await self.run_ggt(*args)
+        await self.assert_failure(warm)
+        self.assertIn("At index 1 diff: 2 != 3", warm.output)
+
+        # Changing the source must invalidate the cache entry.
+        test_file = self.project / "asserts" / "test_asserts.py"
+        source = test_file.read_text(encoding="utf-8")
+        self.write(test_file, source.replace("[1, 3]", "[1, 999]"))
+
+        changed = await self.run_ggt(*args)
+        await self.assert_failure(changed)
+        self.assertIn("assert [1, 2] == [1, 999]", changed.output)
+        self.assertIn("At index 1 diff: 2 != 999", changed.output)
+
+    async def test_pytest_compat_assertion_rewriting_in_workers(
+        self,
+    ) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "asserts",
+            "-j2",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_failure(result)
+        self.assertIn("At index 1 diff: 2 != 3", result.output)
+        self.assertIn("assert 'left' == 'right'", result.output)
+
+    async def test_preload_cache_warm_start(self) -> None:
+        self.use_fixture("pytestcompat")
+        for run_index in (1, 2):
+            events = self.project / f"preload-ev{run_index}.txt"
+            result = await self.run_ggt(
+                "shared",
+                "-j2",
+                "--output-format",
+                "simple",
+                env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
+            )
+            self.skip_if_multiprocessing_blocked(result)
+            await self.assert_success(result)
+            self.assertIn("tests ran: 5", result.output)
+
+            recorded = events.read_text(encoding="utf-8").splitlines()
+            # Shared fixtures keep their once-in-parent semantics on
+            # both the cold-cache run and the warm-cache run (where
+            # the fork server starts before fixture data exists and
+            # workers receive it through the parameter queue).
+            self.assertEqual(recorded.count("session-setup"), 1, run_index)
+            self.assertEqual(recorded.count("session-teardown"), 1, run_index)
+            self.assertEqual(recorded.count("module-a-setup"), 1, run_index)
+
+        self.assertTrue(
+            (self.project / ".ggt_cache" / "preload.json").exists()
+        )
+
+    async def test_pytest_compat_unsupported_features_are_reported(
+        self,
+    ) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "unsupported",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_failure(result)
+        self.assertIn("tests ran: 3", result.output)
+        self.assertIn("errors: 3", result.output)
+        self.assertIn("requested dynamically", result.output)
+        self.assertIn("parametrized_fixture", result.output)
+        self.assertIn(
+            "async fixtures are only supported with function scope",
+            result.output,
+        )
+        self.assertIn(
+            "can only be requested by async tests",
+            result.output,
+        )
+
     async def test_coverage_success_and_missing_coverage_message(self) -> None:
         self.use_fixture("samplepkg")
 
