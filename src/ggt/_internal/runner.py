@@ -27,10 +27,12 @@ import faulthandler
 import io
 import itertools
 import multiprocessing
+import operator
 import os
 import random
 import re
 import shutil
+import statistics
 import sys
 import threading
 import time
@@ -426,6 +428,7 @@ class ParallelTestSuite(unittest.TestSuite):
         backend_dsn: str | None = None,
         worker_init: Callable[[], None] | None = None,
         distribute: str = "module",
+        test_stats: Mapping[str, tuple[float, int]] | None = None,
     ) -> None:
         self.tests = [*_unroll_suites(tests)]
         self.server_conn_args = server_conn_args
@@ -435,6 +438,7 @@ class ParallelTestSuite(unittest.TestSuite):
         self.stop_requested = False
         self.worker_init = worker_init
         self.distribute = distribute
+        self.test_stats = test_stats if test_stats is not None else {}
 
     def _make_task_groups(
         self,
@@ -444,7 +448,14 @@ class ParallelTestSuite(unittest.TestSuite):
 
         Keeping a module's tests in one worker avoids re-importing
         the module (and re-running its module-scoped fixtures) in
-        every worker.  Returns None when grouping would hurt load
+        every worker.  To keep the load balanced, oversized modules
+        are split into capped chunks and the resulting tasks are
+        dispatched heaviest-first (LPT scheduling), so stragglers are
+        small.  Tasks are weighted by historical per-test durations
+        from the running-times log when available (unknown tests are
+        assumed to cost the median of the known ones); without any
+        history every test weighs the same and the weights degrade to
+        test counts.  Returns None when grouping would hurt load
         balancing (too few modules relative to the worker count).
         """
         if self.distribute != "module":
@@ -457,7 +468,46 @@ class ParallelTestSuite(unittest.TestSuite):
         if len(groups) < self.num_workers * 2:
             return None
 
-        return list(groups.values())
+        stats = self.test_stats
+        known = [
+            avg
+            for name in map(str, tests)
+            if (rec := stats.get(name)) and (avg := rec[0]) > 0
+        ]
+        default = statistics.median(known) if known else 1.0
+
+        def weight(test: unittest.TestCase) -> float:
+            rec = stats.get(str(test))
+            avg = rec[0] if rec else default
+            # Clamp: zero-cost records still occupy scheduling slots,
+            # and one outlier record must not dwarf the cap.
+            return max(avg, default / 100)
+
+        weights = {id(test): weight(test) for test in tests}
+
+        # Cap task weight so that a single expensive module cannot
+        # gate the end of the run while other workers sit idle.
+        cap = sum(weights.values()) / (self.num_workers * 4)
+
+        tasks: list[tuple[float, list[unittest.TestCase]]] = []
+        for group in groups.values():
+            chunk: list[unittest.TestCase] = []
+            acc = 0.0
+            for test in group:
+                w = weights[id(test)]
+                if chunk and acc + w > cap:
+                    tasks.append((acc, chunk))
+                    chunk = []
+                    acc = 0.0
+                chunk.append(test)
+                acc += w
+            if chunk:
+                tasks.append((acc, chunk))
+
+        # Heaviest tasks first: with dynamic dispatch this
+        # approximates LPT scheduling and minimizes the idle tail.
+        tasks.sort(key=operator.itemgetter(0), reverse=True)
+        return [chunk for _, chunk in tasks]
 
     def run(self, result: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]  # ty: ignore[invalid-method-override]
         # We use SimpleQueues because they are more predictable.
@@ -1335,6 +1385,7 @@ class ParallelTextTestRunner:
                     num_workers=self.num_workers,
                     worker_init=worker_init,
                     distribute=self.distribute,
+                    test_stats=stats,
                 )
             else:
                 suite = SequentialTestSuite(
