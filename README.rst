@@ -105,6 +105,17 @@ Test Selection
    few modules to balance the workers, ``module`` automatically falls
    back to per-test distribution.
 
+``--preload/--no-preload``
+   Warm up the worker fork server (enabled by default). ggt records
+   the test suite's dependency graph in ``.ggt_cache/preload.json``
+   after discovery; on the next run the fork server imports that
+   module list concurrently with test discovery, freezes the
+   resulting object graph (``gc.freeze()``) to maximize
+   copy-on-write sharing, and every worker then forks with a warm
+   interpreter. Use ``--no-preload`` if a dependency is not
+   fork-safe at import time (e.g. it starts background threads when
+   imported).
+
 ``--repeat INTEGER``
    Repeat the test suite N times or until the first failure.
 

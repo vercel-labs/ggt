@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib.util
+import multiprocessing
 import os
 import pathlib
 import shutil
@@ -24,6 +25,7 @@ else:
         coverage = None
 
 from . import console, cov, loader, mproc_fixes, results, runner, styles
+from . import preload as preload_mod
 from .decorators import (
     _xfail,
     async_timeout,
@@ -166,6 +168,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="shuffle the order in which tests are run",
     )
     parser.add_argument(
+        "--preload",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "warm up the worker fork server by preloading the test "
+            "suite's dependency graph (cached from the previous run) "
+            "in parallel with test discovery (default: enabled; use "
+            "--no-preload if a dependency is not fork-safe at import "
+            "time)"
+        ),
+    )
+    parser.add_argument(
         "--distribute",
         choices=["module", "test"],
         default="module",
@@ -283,6 +297,7 @@ def test(
     include_unsuccessful: bool,
     option: dict[str, str],
     distribute: str = "module",
+    preload: bool = True,
 ) -> None:
     """Run a test suite.
 
@@ -324,6 +339,12 @@ def test(
         sys.exit(1)
 
     mproc_fixes.patch_multiprocessing(debug=debug)
+
+    if preload and "forkserver" in multiprocessing.get_all_start_methods():
+        # Start the fork server immediately: it warms up on the module
+        # list cached by the previous run while this process performs
+        # test discovery.
+        preload_mod.start_forkserver(preload_mod.load_module_cache())
 
     if verbosity > 1 and output_format is runner.OutputFormat.stacked:
         console.secho(
@@ -378,6 +399,7 @@ def test(
             failfast=failfast,
             shuffle=shuffle,
             distribute=distribute,
+            preload=preload,
             repeat=repeat,
             selected_shard=selected_shard,
             total_shards=total_shards,
@@ -470,6 +492,7 @@ def _run(
     failfast: bool,
     shuffle: bool,
     distribute: str,
+    preload: bool,
     repeat: int,
     selected_shard: int,
     total_shards: int,
@@ -514,6 +537,11 @@ def _run(
         exclude=exclude,
         progress_cb=update_progress,
     )
+
+    if preload:
+        # Record the post-discovery module set to warm up the next
+        # run's fork server (see ggt._internal.preload).
+        preload_mod.save_module_cache()
 
     if list_tests:
         console.echo(err=True)
