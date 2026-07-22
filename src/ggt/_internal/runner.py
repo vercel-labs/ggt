@@ -212,6 +212,14 @@ def _run_test(test: unittest.TestCase) -> None:
     suite.run(test, result)
 
 
+def _run_test_group(tests: Sequence[unittest.TestCase]) -> None:
+    # A group of tests (typically one test module's worth) dispatched
+    # to a single worker so that the module is imported — and its
+    # module-scoped fixtures are set up — in one process only.
+    for test in tests:
+        _run_test(test)
+
+
 def _is_exc_info(args: Any) -> TypeGuard[results.ExcInfo]:
     return (
         isinstance(args, tuple)
@@ -404,6 +412,7 @@ class ParallelTestSuite(unittest.TestSuite):
         num_workers: int = 1,
         backend_dsn: str | None = None,
         worker_init: Callable[[], None] | None = None,
+        distribute: str = "module",
     ) -> None:
         self.tests = [*_unroll_suites(tests)]
         self.server_conn_args = server_conn_args
@@ -412,6 +421,30 @@ class ParallelTestSuite(unittest.TestSuite):
         self.num_workers = num_workers
         self.stop_requested = False
         self.worker_init = worker_init
+        self.distribute = distribute
+
+    def _make_task_groups(
+        self,
+        tests: list[unittest.TestCase],
+    ) -> list[list[unittest.TestCase]] | None:
+        """Group tests by module for worker dispatch.
+
+        Keeping a module's tests in one worker avoids re-importing
+        the module (and re-running its module-scoped fixtures) in
+        every worker.  Returns None when grouping would hurt load
+        balancing (too few modules relative to the worker count).
+        """
+        if self.distribute != "module":
+            return None
+
+        groups: dict[str, list[unittest.TestCase]] = {}
+        for test in tests:
+            groups.setdefault(test.__class__.__module__, []).append(test)
+
+        if len(groups) < self.num_workers * 2:
+            return None
+
+        return list(groups.values())
 
     def run(self, result: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]  # ty: ignore[invalid-method-override]
         # We use SimpleQueues because they are more predictable.
@@ -473,17 +506,29 @@ class ParallelTestSuite(unittest.TestSuite):
                 if self.stop_requested:
                     break
 
-                items = [
-                    loader.TestCasePickleWrapper(test)
-                    for test in (
-                        filter(
-                            lambda t: ("test_zREPEAT" in str(t)) == is_repeat,
-                            self.tests,
-                        )
-                    )
+                phase_tests = [
+                    test
+                    for test in self.tests
+                    if ("test_zREPEAT" in str(test)) == is_repeat
                 ]
 
-                ar = pool.map_async(_run_test, items, chunksize=1)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
+                groups = self._make_task_groups(phase_tests)
+                if groups is not None:
+                    group_items = [
+                        [loader.TestCasePickleWrapper(test) for test in group]
+                        for group in groups
+                    ]
+                    ar = pool.map_async(
+                        _run_test_group,  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
+                        group_items,
+                        chunksize=1,
+                    )
+                else:
+                    items = [
+                        loader.TestCasePickleWrapper(test)
+                        for test in phase_tests
+                    ]
+                    ar = pool.map_async(_run_test, items, chunksize=1)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
 
                 while True:
                     try:
@@ -1191,8 +1236,10 @@ class ParallelTextTestRunner:
         failfast: bool = False,
         shuffle: bool = False,
         options: Mapping[str, str] | None = None,
+        distribute: str = "module",
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
+        self.distribute = distribute
         self.num_workers = num_workers
         self.verbosity = verbosity
         self.warnings = warnings
@@ -1260,6 +1307,7 @@ class ParallelTextTestRunner:
                     self._sort_tests(cases),
                     num_workers=self.num_workers,
                     worker_init=worker_init,
+                    distribute=self.distribute,
                 )
             else:
                 suite = SequentialTestSuite(

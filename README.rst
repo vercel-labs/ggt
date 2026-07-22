@@ -97,6 +97,14 @@ Test Selection
 ``--shuffle``
    Randomize the order in which tests are executed.
 
+``--distribute [module|test]``
+   Parallel work distribution granularity. ``module`` (the default)
+   keeps each test module's tests in a single worker, avoiding
+   repeated module imports and module-fixture setups across workers;
+   ``test`` distributes each test individually. When there are too
+   few modules to balance the workers, ``module`` automatically falls
+   back to per-test distribution.
+
 ``--repeat INTEGER``
    Repeat the test suite N times or until the first failure.
 

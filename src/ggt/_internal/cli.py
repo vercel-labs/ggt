@@ -166,6 +166,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="shuffle the order in which tests are run",
     )
     parser.add_argument(
+        "--distribute",
+        choices=["module", "test"],
+        default="module",
+        help=(
+            'parallel work distribution granularity: "module" keeps '
+            "each test module's tests in a single worker (avoiding "
+            'repeated imports and module fixture setup); "test" '
+            "distributes each test individually (default: module, "
+            "with an automatic fallback to per-test distribution when "
+            "there are too few modules to balance the workers)"
+        ),
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -269,6 +282,7 @@ def test(
     result_log: str | None,
     include_unsuccessful: bool,
     option: dict[str, str],
+    distribute: str = "module",
 ) -> None:
     """Run a test suite.
 
@@ -363,6 +377,7 @@ def test(
             warnings=warnings,
             failfast=failfast,
             shuffle=shuffle,
+            distribute=distribute,
             repeat=repeat,
             selected_shard=selected_shard,
             total_shards=total_shards,
@@ -454,6 +469,7 @@ def _run(
     warnings: bool,
     failfast: bool,
     shuffle: bool,
+    distribute: str,
     repeat: int,
     selected_shard: int,
     total_shards: int,
@@ -528,6 +544,7 @@ def _run(
             num_workers=jobs,
             failfast=failfast,
             shuffle=shuffle,
+            distribute=distribute,
             options=options,
         )
 
