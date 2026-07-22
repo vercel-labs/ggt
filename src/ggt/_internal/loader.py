@@ -20,6 +20,7 @@ import re
 import sys
 import unittest
 
+from . import marks as _marks
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -82,6 +83,7 @@ class TestLoader(unittest.TestLoader):
         exclude: Sequence[str] = (),
         include: Sequence[str] = (),
         progress_cb: Callable[[int, int], None] | None = None,
+        mark_filter: Callable[[frozenset[str]], bool] | None = None,
     ):
         super().__init__()
         self.verbosity = verbosity
@@ -97,6 +99,7 @@ class TestLoader(unittest.TestLoader):
             self.exclude = None
 
         self.progress_cb = progress_cb
+        self.mark_filter = mark_filter
 
     def getTestCaseNames(
         self, testCaseClass: type[unittest.TestCase]
@@ -122,6 +125,17 @@ class TestLoader(unittest.TestLoader):
                 if (
                     not any(r.search(n) for r in self.exclude)
                     and not any(r.search(f"{cname}.{n}") for r in self.exclude)
+                )
+            ]
+
+        if self.mark_filter is not None:
+            names = [
+                n
+                for n in names
+                if self.mark_filter(
+                    _marks.get_marks(
+                        getattr(testCaseClass, n, None), testCaseClass
+                    )
                 )
             ]
 
@@ -532,12 +546,14 @@ def discover(
     exclude: Sequence[str] = (),
     include: Sequence[str] = (),
     progress_cb: Callable[[int, int], None] | None = None,
+    mark_filter: Callable[[frozenset[str]], bool] | None = None,
 ) -> unittest.TestSuite:
     test_loader = TestLoader(
         verbosity=verbosity,
         exclude=exclude,
         include=include,
         progress_cb=progress_cb,
+        mark_filter=mark_filter,
     )
 
     suite = unittest.TestSuite()

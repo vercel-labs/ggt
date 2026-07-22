@@ -91,6 +91,13 @@ Test Selection
    Skip tests matching the regular expression. Can be specified multiple
    times.
 
+``-m, --mark MARKEXPR``
+   Only run tests matching the given mark expression, e.g.
+   ``-m 'slow and not integration'``.  Marks are attached with the
+   ``@ggt.mark`` decorator.  Expression terms that are not plain
+   identifiers are treated as regular expressions and matched in
+   full against each mark name, e.g. ``-m 'integration_.*'``.
+
 ``-x, --failfast``
    Stop execution after the first test failure or error.
 
@@ -206,6 +213,12 @@ Test Decorators
 
 ``@skip(reason)``
    Skip a test entirely (from standard unittest).
+
+``@mark.<name>`` / ``@mark(*names)``
+   Attach free-form labels to a test method, function, or class
+   (class marks apply to every test in the class, subclasses
+   included).  Marks are inert; their only effect is test selection
+   with ``-m/--mark``.
 
 Fixture System
 --------------

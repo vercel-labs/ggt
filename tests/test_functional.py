@@ -196,6 +196,39 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_success(result)
         self.assertIn("tests ran: 2", result.output)
 
+    async def test_mark_selection(self) -> None:
+        self.use_fixture("marked")
+
+        cases = [
+            ("slow", 2),
+            ("slow and not integration", 1),
+            # suite_a is a class-level mark.
+            ("suite_a", 3),
+            # Non-identifier terms are regexps over mark names.
+            ("integ.*", 2),
+            ("not (slow or integration)", 2),
+        ]
+        for expr, expected in cases:
+            with self.subTest(expr=expr):
+                result = await self.run_ggt(
+                    "tests",
+                    "-m",
+                    expr,
+                    "-j1",
+                    "--output-format",
+                    "simple",
+                )
+                await self.assert_success(result)
+                self.assertIn(f"tests ran: {expected}", result.output)
+
+        invalid = await self.run_ggt("tests", "-m", "slow oops")
+        await self.assert_failure(invalid)
+        self.assertIn("invalid mark expression", invalid.output)
+
+        bad_regexp = await self.run_ggt("tests", "-m", "slow or [")
+        await self.assert_failure(bad_regexp)
+        self.assertIn("bad mark pattern", bad_regexp.output)
+
     async def test_fixture_projects_are_directly_runnable(self) -> None:
         cases = [
             ("fixtures/basic/tests", "tests ran: 5"),

@@ -24,7 +24,7 @@ else:
     except ImportError:
         coverage = None
 
-from . import console, cov, loader, mproc_fixes, results, runner, styles
+from . import console, cov, loader, marks, mproc_fixes, results, runner, styles
 from . import preload as preload_mod
 from .decorators import (
     _xfail,
@@ -34,6 +34,7 @@ from .decorators import (
     xerror,
     xfail,
 )
+from .marks import mark
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 __all__ = (
     "_xfail",
     "async_timeout",
+    "mark",
     "not_implemented",
     "skip",
     "xerror",
@@ -168,6 +170,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="REGEXP",
         help="do not run tests which match the given regular expression",
+    )
+    parser.add_argument(
+        "-m",
+        "--mark",
+        dest="mark_expr",
+        type=str,
+        default=None,
+        metavar="MARKEXPR",
+        help=(
+            "only run tests matching the given mark expression, "
+            "e.g. -m 'slow and not integration'; marks are attached "
+            "with the ggt.mark decorator, and non-identifier terms "
+            "are treated as regular expressions over mark names"
+        ),
     )
     parser.add_argument(
         "-x",
@@ -315,6 +331,7 @@ def test(
     option: dict[str, str],
     distribute: str = "module",
     preload: bool = True,
+    mark_expr: str | None = None,
 ) -> None:
     """Run a test suite.
 
@@ -354,6 +371,14 @@ def test(
             fg="red",
         )
         sys.exit(1)
+
+    mark_filter = None
+    if mark_expr:
+        try:
+            mark_filter = marks.compile_mark_expression(mark_expr)
+        except marks.MarkError as e:
+            console.secho(f"Error: {e}", fg="red")
+            sys.exit(1)
 
     mproc_fixes.patch_multiprocessing(debug=debug)
 
@@ -408,6 +433,7 @@ def test(
         return _run(
             include=include,
             exclude=exclude,
+            mark_filter=mark_filter,
             verbosity=verbosity,
             files=files,
             jobs=jobs,
@@ -501,6 +527,7 @@ def _run(
     *,
     include: list[str],
     exclude: list[str],
+    mark_filter: Callable[[frozenset[str]], bool] | None,
     verbosity: int,
     files: list[str],
     jobs: int,
@@ -553,6 +580,7 @@ def _run(
         include=include,
         exclude=exclude,
         progress_cb=update_progress,
+        mark_filter=mark_filter,
     )
 
     if preload:
