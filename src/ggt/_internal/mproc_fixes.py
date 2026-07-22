@@ -11,6 +11,8 @@ import multiprocessing.pool
 import multiprocessing.process
 import multiprocessing.reduction
 import multiprocessing.util
+import os
+import sys
 import types
 
 if TYPE_CHECKING:
@@ -61,6 +63,16 @@ def multiprocessing_pool_worker(
 
     if destructor is not None:
         destructor()
+
+    # Skip interpreter finalization: deallocating the worker's object
+    # graph (much of it inherited from the preloaded fork server) takes
+    # ~15ms per worker and buys nothing — the OS reclaims the memory
+    # anyway.  Test teardowns already ran in the destructor above and
+    # coverage data is saved there too, so a hard exit is safe; it is
+    # also the exit CPython documents for forked children.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def multiprocessing_worker_handler(*args: Any) -> None:
