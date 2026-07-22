@@ -78,7 +78,20 @@ class _KeyValueAction(argparse.Action):
 
 def _open_running_times_log(path: str | None) -> TextIO | None:
     if path is None:
-        return None
+        # Default to a cache file: historical timings feed shard
+        # balancing and the parallel scheduler's task weighting.
+        cache_dir = preload_mod.ensure_cache_dir()
+        if cache_dir is None:
+            return None
+        try:
+            return open(
+                cache_dir / "running_times.csv",
+                "a+",
+                encoding="utf-8",
+                newline="",
+            )
+        except OSError:
+            return None
     return open(path, "a+", encoding="utf-8", newline="")
 
 
@@ -221,7 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--running-times-log",
         dest="running_times_log_file",
         metavar="FILEPATH",
-        help="maintain a running time log file at FILEPATH",
+        help=(
+            "maintain a running time log file at FILEPATH "
+            "(default: .ggt_cache/running_times.csv; the timings feed "
+            "shard balancing and parallel task scheduling)"
+        ),
     )
     parser.add_argument(
         "--result-log",
