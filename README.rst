@@ -94,9 +94,11 @@ Test Selection
 ``-m, --mark MARKEXPR``
    Only run tests matching the given mark expression, e.g.
    ``-m 'slow and not integration'``.  Marks are attached with the
-   ``@ggt.mark`` decorator.  Expression terms that are not plain
-   identifiers are treated as regular expressions and matched in
-   full against each mark name, e.g. ``-m 'integration_.*'``.
+   ``@ggt.mark`` decorator (with pytest compatibility enabled,
+   ``pytest.mark`` marks are matched as well).  Expression terms
+   that are not plain identifiers are treated as regular expressions
+   and matched in full against each mark name, e.g.
+   ``-m 'integration_.*'``.
 
 ``-x, --failfast``
    Stop execution after the first test failure or error.
@@ -171,6 +173,11 @@ Output and Reporting
 Advanced Options
 ----------------
 
+``--pytest/--no-pytest``
+   Enable or disable pytest-compatible test collection (see *pytest
+   Compatibility* below). Enabled by default when pytest is installed,
+   e.g. via the ``ggt[pytest]`` extra.
+
 ``--debug``
    Output internal debug logs for troubleshooting.
 
@@ -188,6 +195,123 @@ Advanced Options
    ``uv add --dev ggt[coverage]`` or
    ``python -m pip install 'ggt[coverage]'``.
 
+
+pytest Compatibility
+====================
+
+ggt can discover and run pytest-style test suites.  Install the extra:
+
+.. code-block:: bash
+
+   uv add --dev ggt[pytest]
+   # or: python -m pip install 'ggt[pytest]'
+
+Compatibility mode is **enabled automatically whenever pytest is
+importable** and can be turned off with ``--no-pytest``.  Pure-unittest
+modules are never touched — synthesis only applies to modules that
+contain pytest-style tests.
+
+What works
+----------
+
+- **Collection**: bare ``test_*`` functions and non-unittest ``Test*``
+  classes; pytest-style discovery (``test*.py`` and ``*_test.py`` files,
+  test directories without ``__init__.py``, pytest's default
+  ``norecursedirs``); ``conftest.py`` loading.
+- **Fixtures**: ``@pytest.fixture`` with function/class/module/session
+  scopes, ``yield`` teardown, ``autouse``, dependency injection,
+  fixture overriding by conftest proximity, and **parametrized
+  fixtures** (``params=`` with ``ids``, ``pytest.param`` values and
+  per-parameter marks) — every parameter combination reachable from a
+  test's fixture closure becomes a separate test that is parallelized
+  and sharded individually.
+- **The request object**: ``request.param``, ``request.node`` (with
+  ``get_closest_marker()``), ``getfixturevalue()``, ``addfinalizer()``
+  and a minimal ``request.config`` whose ``getoption()`` is backed by
+  ggt's ``-X key=value`` options (unknown options resolve to the
+  provided default).
+- **Built-in fixtures**: ``tmp_path``, ``tmp_path_factory``,
+  ``monkeypatch`` (including ``context()``), ``capsys`` (including
+  ``disabled()``), ``caplog``, ``recwarn``.
+- **Marks**: ``skip``, ``skipif`` (including string conditions),
+  ``xfail`` (``reason``, ``condition``, ``raises``, ``strict``),
+  ``parametrize`` (including stacking, ``pytest.param`` with custom ids
+  and per-parameter marks) and ``usefixtures``.  Each parameter set
+  becomes a separate test that is parallelized and sharded
+  individually.  Custom marks are translated to ggt marks, so
+  ``-m 'slow and not integration'`` style selection works uniformly.
+- **Ini options**: the collection-affecting subset of
+  ``[tool.pytest.ini_options]`` (from ``pyproject.toml``) or
+  ``pytest.ini`` — ``python_files``, ``python_classes``,
+  ``python_functions``, ``testpaths`` and ``usefixtures``.  Other ini
+  options (notably ``addopts``) are ignored.
+- **Assertion introspection**: plain ``assert`` statements are rewritten
+  with pytest's own assertion rewriter, producing rich failure messages
+  (``assert [1, 2] == [1, 3] ... At index 1 diff: 2 != 3``).  Rewritten
+  bytecode is cached in ``__pycache__`` under a ggt-specific tag (never
+  clashing with pytest's own cache), so repeat runs and worker
+  processes skip recompilation; set ``GGT_PYTEST_REWRITE_CACHE=0`` to
+  disable the cache.
+- **xunit-style hooks**: ``setup_module``/``teardown_module``,
+  ``setup_class``/``teardown_class``,
+  ``setup_method``/``teardown_method``.
+- **Imperative outcomes**: ``pytest.skip()``, ``pytest.fail()``,
+  ``pytest.raises()``, ``pytest.approx()``.
+- **Async tests and async fixtures**: ``async def test_*`` functions
+  and methods run on synthesized ``unittest.IsolatedAsyncioTestCase``
+  classes — each test gets a fresh event loop, matching
+  pytest-asyncio's default loop scope (no ``asyncio_mode``
+  configuration needed; ``@pytest.mark.asyncio`` markers are accepted
+  and ignored).  ``async def`` fixtures (including ``yield``
+  teardown) resolve inside the requesting test's event loop and are
+  restricted to function scope — wider scopes would bind a value to a
+  single test's loop.  A sync fixture may depend on an async fixture
+  when the requesting test is async.
+- **anyio**: tests marked ``@pytest.mark.anyio`` follow anyio's
+  plugin contract natively — the ``anyio_backend`` fixture joins the
+  test's fixture closure (the built-in default is parametrized over
+  every installed backend, and user conftest overrides apply), each
+  backend becomes a separate test (``[asyncio]``, ``[trio]``), and
+  the test runs via ``anyio.run()`` on the selected backend.
+
+Execution model
+---------------
+
+Under the hood each pytest-style test becomes a synthesized
+``unittest.TestCase`` method, so the full ggt feature set (parallel
+workers, sharding, timing logs, result logs, ``-k``/``-e`` selection)
+applies uniformly.
+
+Unlike stock pytest — and like ``pytest-xdist`` — tests run in worker
+processes.  ggt goes one step further with **shared fixtures**:
+session- and module-scoped fixture values are computed *once* in the
+runner process, pickled, and shipped to all workers.  Fixture teardown
+(the code after ``yield``) also runs once, in the runner.  Values that
+cannot be pickled automatically fall back to lazy per-worker execution
+(pytest-xdist semantics) with a warning naming the fixture.  Set
+``GGT_PYTEST_SHARED_FIXTURES=0`` to disable parent-process execution
+entirely.
+
+Known deviations:
+
+- module-scoped fixture teardown runs at session teardown (in the
+  runner) rather than immediately after the module's last test;
+- class-scoped fixtures run once per worker per class (the same
+  semantics as ``setUpClass``);
+- imported test functions are not re-collected in the importing module.
+
+Not supported (yet)
+-------------------
+
+The pytest plugin/hook system and third-party plugins (pytest-asyncio,
+pytest-mock, ...) — hooks defined in conftest.py files are ignored
+with a warning; ``pytest_generate_tests``; indirect parametrization;
+dynamically requested parametrized fixtures
+(``request.getfixturevalue()`` of a parametrized fixture); package-
+and dynamically-scoped fixtures; async fixtures with
+class/module/session scope; ``capfd``; ini options beyond the subset
+above; and pytest's ``-k`` expression syntax (ggt's regex-based
+``-k`` applies instead; use ``-m`` for mark expressions).
 
 Test Decorators and Fixtures
 ============================
@@ -518,7 +642,8 @@ Requirements
 
 Optional dependencies:
 
-- coverage >= 7.4
+- coverage >= 7.4 (``ggt[coverage]``)
+- pytest >= 8, < 9 (``ggt[pytest]``, enables pytest compatibility mode)
 
 Git Hooks
 =========

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from typing_extensions import TypeAliasType
 from collections.abc import Mapping
 
-import contextlib
 import contextvars
 import heapq
 import importlib
@@ -21,9 +20,15 @@ import sys
 import unittest
 
 from . import marks as _marks
+from . import pytest_compat
+from .imputil import sys_path as _sys_path
+from .pytest_compat import discovery as _pytest_discovery
+from .pytest_compat import synth as _pytest_synth
+
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Sequence
+    import types
+    from collections.abc import Callable, Iterable, Sequence
 
 
 Client = TypeAliasType("Client", Any)
@@ -101,10 +106,34 @@ class TestLoader(unittest.TestLoader):
         self.progress_cb = progress_cb
         self.mark_filter = mark_filter
 
+    def loadTestsFromModule(
+        self,
+        module: types.ModuleType,
+        *args: Any,
+        **kwargs: Any,
+    ) -> unittest.TestSuite:
+        if pytest_compat.is_enabled():
+            _pytest_synth.synthesize_module(module)
+        return super().loadTestsFromModule(module, *args, **kwargs)
+
     def getTestCaseNames(
         self, testCaseClass: type[unittest.TestCase]
     ) -> Sequence[str]:
-        names = super().getTestCaseNames(testCaseClass)
+        if getattr(testCaseClass, _pytest_synth.CLASS_MARKER, False):
+            # Synthesized pytest classes may contain test methods that
+            # do not carry unittest's "test" name prefix (e.g. via the
+            # python_functions ini option); enumerate them by the
+            # marks attribute every synthesized method carries.
+            names: Sequence[str] = sorted(
+                name
+                for name in vars(testCaseClass)
+                if hasattr(
+                    getattr(testCaseClass, name, None),
+                    _marks.MARKS_ATTR,
+                )
+            )
+        else:
+            names = super().getTestCaseNames(testCaseClass)
         unfiltered_len = len(names)
         cname = testCaseClass.__name__
 
@@ -381,23 +410,6 @@ def get_cases_by_shard(
     return _merge_results(result_cases)
 
 
-def _set_sys_path(entries: list[str]) -> None:
-    sys.path[:] = entries
-    importlib.invalidate_caches()
-
-
-@contextlib.contextmanager
-def _sys_path(*paths: str) -> Iterator[None]:
-    """Modify sys.path by temporarily placing the given entry in front"""
-    orig_sys_path = sys.path[:]
-    paths_set = {*paths}
-    _set_sys_path([*paths, *(p for p in orig_sys_path if p not in paths_set)])
-    try:
-        yield
-    finally:
-        _set_sys_path(orig_sys_path)
-
-
 _ImportLocation = TypeAliasType("_ImportLocation", tuple[list[str], str, str])
 
 
@@ -463,6 +475,13 @@ def _restore_TestCase(
     search_paths, modname, clsname = clsloc
     with _sys_path(*search_paths):
         mod = importlib.import_module(modname)
+
+    if pytest_compat.is_enabled():
+        # Re-create synthesized TestCase classes (and xunit module
+        # hooks) after the module re-import.  Synthesis is idempotent
+        # and deterministic, so the parent and the workers arrive at
+        # identical classes.
+        _pytest_synth.synthesize_module(mod)
 
     cls = getattr(mod, clsname)
     if not issubclass(cls, unittest.TestCase):
@@ -557,6 +576,12 @@ def discover(
     )
 
     suite = unittest.TestSuite()
+
+    if pytest_compat.is_enabled():
+        for entry in paths:
+            suite.addTest(_pytest_discovery.discover(entry, test_loader))
+
+        return suite
 
     for entry in paths:
         file = pathlib.Path(entry).absolute()

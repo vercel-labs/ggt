@@ -32,11 +32,18 @@ dependencies = [
 coverage = [
     'coverage >= 7.4',
 ]
+pytest = [
+    'pytest >= 8, < 9',
+]
 
 [dependency-groups]
 test = [
+    "anyio>=4",
     "coverage>=7.4",
+    "hypothesis>=6,<7",
+    "pytest>=8,<9",
     "time-machine>=2.16",
+    "trio>=0.26",
 ]
 
 # Typecheckers and linters must be pinned exactly
@@ -48,6 +55,9 @@ check = [
     "ty==0.0.52",
     "uv==0.11.24",
     "zizmor==1.26.1",
+    # Typecheckers must see the optional integrations
+    # (pytest, anyio, hypothesis) the same way tests do.
+    { include-group = "test" },
 ]
 
 dev = [

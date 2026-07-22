@@ -24,7 +24,17 @@ else:
     except ImportError:
         coverage = None
 
-from . import console, cov, loader, marks, mproc_fixes, results, runner, styles
+from . import (
+    console,
+    cov,
+    loader,
+    marks,
+    mproc_fixes,
+    pytest_compat,
+    results,
+    runner,
+    styles,
+)
 from . import preload as preload_mod
 from .decorators import (
     _xfail,
@@ -277,6 +287,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="list all the tests and exit",
     )
     parser.add_argument(
+        "--pytest",
+        dest="use_pytest",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "enable pytest-compatible test collection (bare test_* "
+            "functions, Test* classes, pytest-style discovery); "
+            "enabled by default when pytest is installed, "
+            "e.g. via the ggt[pytest] extra"
+        ),
+    )
+    parser.add_argument(
         "-X",
         "--option",
         action=_KeyValueAction,
@@ -331,6 +353,7 @@ def test(
     option: dict[str, str],
     distribute: str = "module",
     preload: bool = True,
+    use_pytest: bool | None = None,
     mark_expr: str | None = None,
 ) -> None:
     """Run a test suite.
@@ -372,6 +395,26 @@ def test(
         )
         sys.exit(1)
 
+    if use_pytest is None:
+        use_pytest = pytest_compat.pytest_available()
+    elif use_pytest and not pytest_compat.pytest_available():
+        console.secho(
+            "Error: --pytest requires pytest to be installed.\n"
+            "Enable it with: uv add --dev ggt[pytest]\n"
+            "Or install it with: python -m pip install 'ggt[pytest]'",
+            fg="red",
+        )
+        sys.exit(1)
+
+    pytest_compat.set_enabled(enabled=use_pytest)
+    ini = None
+    if use_pytest:
+        # Must precede test discovery so that test modules are
+        # imported through the assertion-rewriting hook.
+        pytest_compat.install_assertion_rewriting()
+        pytest_compat.export_options(option)
+        ini = pytest_compat.load_ini_config()
+
     mark_filter = None
     if mark_expr:
         try:
@@ -403,14 +446,22 @@ def test(
 
     if not files:
         cwd = os.path.abspath(os.getcwd())
-        if os.path.exists(os.path.join(cwd, "tests")):
-            files = ["tests"]
-        else:
-            console.secho(
-                'Error: no test path specified and no "tests" directory found',
-                fg="red",
-            )
-            sys.exit(1)
+        if ini is not None and ini.testpaths:
+            files = [
+                path
+                for path in ini.testpaths
+                if os.path.exists(os.path.join(cwd, path))
+            ]
+        if not files:
+            if os.path.exists(os.path.join(cwd, "tests")):
+                files = ["tests"]
+            else:
+                console.secho(
+                    "Error: no test path specified and no "
+                    '"tests" directory found',
+                    fg="red",
+                )
+                sys.exit(1)
 
     for file in files:
         if not os.path.exists(file):

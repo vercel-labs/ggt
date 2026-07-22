@@ -1,0 +1,9 @@
+[project]
+name = "iniopts"
+
+[tool.pytest.ini_options]
+python_files = ["check_*.py"]
+python_classes = ["Check*"]
+python_functions = ["check_*"]
+testpaths = ["suite"]
+usefixtures = ["global_marker"]
