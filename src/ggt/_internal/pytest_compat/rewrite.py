@@ -33,17 +33,19 @@ import importlib.abc
 import importlib.machinery
 import importlib.metadata
 import importlib.util
+import inspect
 import marshal
 import os
 import pathlib
 import sys
 import types
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from . import collect
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 CACHE_ENV_DISABLE = "GGT_PYTEST_REWRITE_CACHE"
 
@@ -166,6 +168,9 @@ class _ConfigStub:
         return 0
 
     def getoption(self, name: str, default: object = None) -> object:
+        if name == "verbose":
+            # pytest 7's assertrepr_compare compares this to ints.
+            return 0
         return default
 
     def get_terminal_writer(self) -> _TerminalWriterStub:
@@ -173,13 +178,42 @@ class _ConfigStub:
 
 
 def _install_reprcompare(util_mod: Any) -> None:
-    config = _ConfigStub()
+    params: Mapping[str, inspect.Parameter]
+    try:
+        params = inspect.signature(util_mod.assertrepr_compare).parameters
+    except (TypeError, ValueError):  # pragma: no cover
+        params = {}
+
+    if "highlighter" in params:
+        # pytest >= 9: keyword-only signature, yields the explanation
+        # lines (first line is the summary) without a Config.
+        highlighter = getattr(
+            util_mod,
+            "dummy_highlighter",
+            lambda source, lexer="python": source,
+        )
+
+        def compare(op: str, left: object, right: object) -> Sequence[str]:
+            return list(
+                util_mod.assertrepr_compare(
+                    op=op,
+                    left=left,
+                    right=right,
+                    verbose=0,
+                    highlighter=highlighter,
+                    assertion_text_diff_style="ndiff",
+                )
+            )
+    else:
+        # pytest 8: positional signature taking a Config-like object.
+        config = _ConfigStub()
+
+        def compare(op: str, left: object, right: object) -> Sequence[str]:
+            return util_mod.assertrepr_compare(config, op, left, right) or []
 
     def reprcompare(op: str, left: object, right: object) -> str | None:
         try:
-            expl: Sequence[str] | None = util_mod.assertrepr_compare(
-                config, op, left, right
-            )
+            expl: Sequence[str] = compare(op, left, right)
         except Exception:
             return None
         if not expl:
@@ -191,6 +225,22 @@ def _install_reprcompare(util_mod: Any) -> None:
 
 def should_rewrite(filename: str) -> bool:
     return filename == "conftest.py" or collect.is_test_file(filename)
+
+
+_rewrite_failure_warned: list[bool] = []
+
+
+def _warn_rewrite_failure(path: str, exc: Exception) -> None:
+    """Warn once per process when assertion rewriting degrades."""
+    if _rewrite_failure_warned:
+        return
+    _rewrite_failure_warned.append(True)
+    warnings.warn(
+        f"pytest assertion rewriting failed for {path} ({exc!r}); "
+        f"falling back to plain asserts (reported once per process)",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 class RewriteLoader(importlib.machinery.SourceFileLoader):
@@ -246,9 +296,9 @@ class RewriteLoader(importlib.machinery.SourceFileLoader):
                 )
             except SyntaxError:
                 raise
-            except Exception:  # noqa: S110
+            except Exception as e:
                 # Fall through to a plain compile below.
-                pass
+                _warn_rewrite_failure(path, e)
         code = super().source_to_code(data, path, _optimize=_optimize)
         assert isinstance(code, types.CodeType)
         return code

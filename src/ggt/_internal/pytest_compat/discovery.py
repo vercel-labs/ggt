@@ -142,6 +142,65 @@ def import_test_file(file: pathlib.Path) -> types.ModuleType:
     return mod
 
 
+_plugin_cache: dict[str, types.ModuleType] = {}
+
+
+def plugin_modules(mod: types.ModuleType) -> list[types.ModuleType]:
+    """The modules named by *mod*'s ``pytest_plugins``, transitively.
+
+    pytest's ``pytest_plugins`` conftest variable names plugin
+    modules to load.  ggt does not implement the plugin hook system,
+    but a very common kind of plugin is a plain module of
+    ``@pytest.fixture`` definitions (e.g. a library shipping its
+    test fixtures); those work as additional fixture sources, so
+    import them and let the caller add them to the fixture registry.
+    Hook functions defined by a plugin are reported and ignored,
+    exactly as for conftest files.
+    """
+    result: list[types.ModuleType] = []
+    _collect_plugins(mod, result, seen=set())
+    return result
+
+
+def _collect_plugins(
+    mod: types.ModuleType,
+    result: list[types.ModuleType],
+    seen: set[str],
+) -> None:
+    declared = getattr(mod, "pytest_plugins", None)
+    if declared is None:
+        return
+    if isinstance(declared, str):
+        declared = [declared]
+
+    origin = getattr(mod, "__file__", None)
+    basedir = pathlib.Path(origin).parent if origin else pathlib.Path.cwd()
+
+    for name in declared:
+        if not isinstance(name, str) or name in seen:
+            continue
+        seen.add(name)
+        plugin = _plugin_cache.get(name)
+        if plugin is None:
+            try:
+                # The declaring conftest's directory participates in
+                # resolution so that plugin modules living next to
+                # the conftest import the same way they would under
+                # pytest's rootdir-relative loading.
+                with imputil.sys_path(str(basedir)):
+                    plugin = importlib.import_module(name)
+            except ImportError as e:
+                raise ImportError(
+                    f"cannot import pytest plugin {name!r} declared "
+                    f"by {mod.__name__}: {e}"
+                ) from e
+            plugin_origin = getattr(plugin, "__file__", None)
+            _warn_ignored_hooks(plugin, pathlib.Path(plugin_origin or name))
+            _plugin_cache[name] = plugin
+        result.append(plugin)
+        _collect_plugins(plugin, result, seen)
+
+
 def _warn_ignored_hooks(mod: types.ModuleType, path: pathlib.Path) -> None:
     hooks = sorted(
         name

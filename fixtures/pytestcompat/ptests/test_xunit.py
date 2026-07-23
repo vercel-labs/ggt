@@ -43,3 +43,17 @@ class TestLifecycle:
     def test_lifecycle_two(self):
         assert self.class_ready
         assert self.prepared == "test_lifecycle_two"
+
+
+class TestSkippedInSetupClass:
+    @classmethod
+    def setup_class(cls):
+        # pytest.skip() raises Skipped, a BaseException subclass;
+        # it must be translated to unittest.SkipTest instead of
+        # escaping setUpClass and killing the worker process.
+        import pytest
+
+        pytest.importorskip("ggt_no_such_module_exists")
+
+    def test_never_runs(self):
+        raise AssertionError("must have been skipped in setup_class")

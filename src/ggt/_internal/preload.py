@@ -56,7 +56,9 @@ def compute_preload_state() -> dict[str, object]:
     """
     stdlib = sys.stdlib_module_names
     modules: list[list[str]] = []
-    for name, mod in sys.modules.items():
+    # Snapshot: reading __file__ below may trigger a module __getattr__
+    # that lazily imports and mutates sys.modules mid-iteration.
+    for name, mod in list(sys.modules.items()):
         top = name.partition(".")[0]
         if top in stdlib:
             continue

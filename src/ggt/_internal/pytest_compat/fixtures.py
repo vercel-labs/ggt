@@ -148,8 +148,8 @@ def _extract_marker(obj: object) -> tuple[Any, Callable[..., object]] | None:
     Returns (marker, fixture function) or None if *obj* is not a
     fixture definition.  Supports both the pytest >= 8.4 shape
     (``FixtureFunctionDefinition`` with ``_fixture_function_marker``
-    and ``_fixture_function``) and the older shape (a plain function
-    with a ``_pytestfixturefunction`` attribute).
+    and ``_fixture_function``) and the older shape (pytest 7 - 8.3: a
+    function with a ``_pytestfixturefunction`` attribute).
     """
     marker = getattr(obj, "_fixture_function_marker", None)
     if marker is not None:
@@ -160,6 +160,13 @@ def _extract_marker(obj: object) -> tuple[Any, Callable[..., object]] | None:
 
     marker = getattr(obj, "_pytestfixturefunction", None)
     if marker is not None and callable(obj):
+        # pytest < 8.4 wraps the fixture function in a guard that
+        # fails on direct calls; the original is stashed in
+        # ``__pytest_wrapped__.obj``.
+        wrapped = getattr(obj, "__pytest_wrapped__", None)
+        func = getattr(wrapped, "obj", None)
+        if callable(func):
+            return marker, func
         return marker, obj
 
     return None
@@ -288,6 +295,11 @@ _conftest_chain_cache: dict[str, list[types.ModuleType]] = {}
 def _conftest_modules(mod: types.ModuleType) -> list[types.ModuleType]:
     """conftest.py modules that apply to *mod*, nearest first.
 
+    Fixture-contributing plugin modules declared via a conftest's
+    ``pytest_plugins`` follow the conftest chain, giving them lower
+    lookup priority than any conftest (as in pytest, where conftest
+    fixtures override plugin fixtures of the same name).
+
     The chain depends only on the module's directory, so it is
     computed (and the conftest files stat'ed) once per directory.
     """
@@ -305,6 +317,15 @@ def _conftest_modules(mod: types.ModuleType) -> list[types.ModuleType]:
         conftest = directory / "conftest.py"
         if conftest.is_file():
             result.append(discovery.import_conftest(conftest))
+
+    plugins: list[types.ModuleType] = []
+    seen: set[str] = set()
+    for conftest_mod in result:
+        for plugin in discovery.plugin_modules(conftest_mod):
+            if plugin.__name__ not in seen:
+                seen.add(plugin.__name__)
+                plugins.append(plugin)
+    result.extend(plugins)
 
     _conftest_chain_cache[dirname] = result
     return result

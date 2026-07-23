@@ -69,19 +69,19 @@ def _call_with_optional_arg(
         for p in sig.parameters.values()
     )
     if accepts_arg:
-        hook(arg)
+        _call_hook(hook, arg)
     else:
-        hook()
+        _call_hook(hook)
 
 
 def _call_class_hook(orig_cls: type, hook_name: str) -> None:
     hook = getattr(orig_cls, hook_name)
     if inspect.ismethod(hook):
         # A classmethod, already bound to the class.
-        hook()
+        _call_hook(hook)
     else:
         # A plain function accessed through the class.
-        hook(orig_cls)
+        _call_hook(hook, orig_cls)
 
 
 def _test_name_of(test: unittest.TestCase) -> str:
@@ -105,6 +105,23 @@ def _translate_outcome(e: BaseException) -> BaseException | None:
     if cls.__name__ == "Failed":
         return AssertionError(str(e) or "failed")
     return None
+
+
+def _call_hook(hook: Callable[..., object], *args: object) -> None:
+    """Call an xunit hook, translating pytest outcomes.
+
+    ``pytest.skip()``/``pytest.importorskip()`` raise ``Skipped``, a
+    ``BaseException`` subclass that would otherwise sail through
+    unittest's class/module setup handling and kill the worker
+    process.
+    """
+    try:
+        hook(*args)
+    except BaseException as e:
+        translated = _translate_outcome(e)
+        if translated is not None:
+            raise translated from e
+        raise
 
 
 def _call_test(fn: Callable[..., object], kwargs: dict[str, object]) -> None:
