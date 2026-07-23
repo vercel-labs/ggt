@@ -15,7 +15,11 @@ Follows pytest's collection conventions:
 - directories matching pytest's default ``norecursedirs`` patterns
   are skipped;
 - ``conftest.py`` files are imported top-down along the path from the
-  ``sys.path`` root down to each test file's directory.
+  ``sys.path`` root down to each test file's directory;
+- ``pytest_ignore_collect`` hooks defined by conftest files (or their
+  ``pytest_plugins`` modules) can veto collection of files and
+  directories, exactly as under pytest; explicitly named paths are
+  exempt, like pytest's initpaths.
 
 The path → module-name derivation is shared with the worker-side
 restore logic: workers re-import test modules by name, so both
@@ -28,19 +32,20 @@ import fnmatch
 import hashlib
 import importlib
 import importlib.util
+import inspect
 import os
 import pathlib
 import sys
 import unittest
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .. import imputil
 from . import collect, inicfg, rewrite
 
 if TYPE_CHECKING:
     import types
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 TEST_FILE_PATTERNS = collect.TEST_FILE_PATTERNS
 
@@ -72,16 +77,18 @@ def _should_recurse(name: str) -> bool:
 def iter_test_files(root: pathlib.Path) -> Iterator[pathlib.Path]:
     """Yield test files under *root* in deterministic (sorted) order."""
     if root.is_file():
-        # Explicitly named files are collected unconditionally.
+        # Explicitly named files are collected unconditionally
+        # (pytest likewise exempts initpaths from name patterns and
+        # pytest_ignore_collect).
         yield root
         return
 
     subdirs: list[pathlib.Path] = []
     for entry in sorted(root.iterdir()):
         if entry.is_dir():
-            if _should_recurse(entry.name):
+            if _should_recurse(entry.name) and not _ignore_collect(entry):
                 subdirs.append(entry)
-        elif is_test_file(entry.name):
+        elif is_test_file(entry.name) and not _ignore_collect(entry):
             yield entry
 
     for subdir in subdirs:
@@ -156,7 +163,8 @@ def plugin_modules(mod: types.ModuleType) -> list[types.ModuleType]:
     test fixtures); those work as additional fixture sources, so
     import them and let the caller add them to the fixture registry.
     Hook functions defined by a plugin are reported and ignored,
-    exactly as for conftest files.
+    exactly as for conftest files (``pytest_ignore_collect`` being
+    the implemented exception in both cases).
     """
     result: list[types.ModuleType] = []
     _collect_plugins(mod, result, seen=set())
@@ -202,6 +210,115 @@ def _collect_plugins(
         _collect_plugins(plugin, result, seen)
 
 
+_IGNORE_COLLECT_HOOK = "pytest_ignore_collect"
+
+# Arguments ggt can supply to a pytest_ignore_collect hookimpl.  The
+# legacy ``path`` (py.path.local) spelling is not supported; hooks
+# asking for it are reported and ignored like any other hook.
+_IGNORE_COLLECT_ARGS = frozenset({"collection_path", "config"})
+
+
+def _supported_ignore_collect_hook(hook: object) -> bool:
+    """Whether *hook* only asks for arguments ggt can supply."""
+    if not callable(hook):
+        return False
+    try:
+        parameters = inspect.signature(hook).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return all(
+        param.name in _IGNORE_COLLECT_ARGS
+        or param.default is not inspect.Parameter.empty
+        for param in parameters
+        if param.kind
+        not in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }
+    )
+
+
+def _ignore_collect_impl(
+    mod: types.ModuleType,
+) -> Callable[..., object] | None:
+    hook = vars(mod).get(_IGNORE_COLLECT_HOOK)
+    if callable(hook) and _supported_ignore_collect_hook(hook):
+        return cast("Callable[..., object]", hook)
+    return None
+
+
+_ignore_hooks_cache: dict[pathlib.Path, list[Callable[..., object]]] = {}
+
+
+def _ignore_collect_hooks(entry: pathlib.Path) -> list[Callable[..., object]]:
+    """``pytest_ignore_collect`` hookimpls applying to *entry*.
+
+    As in pytest, the hooks come from conftest files of the *parent*
+    directory chain (a directory's own conftest is not consulted for
+    ignoring the directory itself) and from their ``pytest_plugins``
+    modules.  Ordered nearest conftest first, plugin modules last,
+    mirroring pytest's LIFO hook-call order.
+    """
+    cached = _ignore_hooks_cache.get(entry.parent)
+    if cached is not None:
+        return cached
+
+    mods: list[types.ModuleType] = []
+    for directory in reversed(conftest_directories(entry)):
+        # Import top-down so conftest side effects apply in the same
+        # order as during test collection proper.
+        conftest = directory / "conftest.py"
+        if conftest.is_file():
+            mods.append(import_conftest(conftest))
+    mods.reverse()
+
+    plugins: list[types.ModuleType] = []
+    seen: set[str] = set()
+    for mod in mods:
+        for plugin in plugin_modules(mod):
+            if plugin.__name__ not in seen:
+                seen.add(plugin.__name__)
+                plugins.append(plugin)
+
+    hooks = [
+        hook
+        for mod in (*mods, *plugins)
+        if (hook := _ignore_collect_impl(mod)) is not None
+    ]
+    _ignore_hooks_cache[entry.parent] = hooks
+    return hooks
+
+
+def _call_ignore_collect_hook(
+    hook: Callable[..., object],
+    path: pathlib.Path,
+) -> object:
+    # Deferred import: fixtures imports this module.
+    from . import fixtures  # noqa: PLC0415
+
+    kwargs: dict[str, object] = {}
+    for name in inspect.signature(hook).parameters:
+        if name == "collection_path":
+            kwargs[name] = path
+        elif name == "config":
+            kwargs[name] = fixtures.get_config()
+    return hook(**kwargs)
+
+
+def _ignore_collect(entry: pathlib.Path) -> bool:
+    """Whether a ``pytest_ignore_collect`` hook vetoes *entry*.
+
+    Firstresult semantics, as in pytest: the nearest conftest gets the
+    first say and the first non-``None`` result wins (``False`` from a
+    nearer conftest can un-ignore a path an outer one would ignore).
+    """
+    for hook in _ignore_collect_hooks(entry):
+        result = _call_ignore_collect_hook(hook, entry)
+        if result is not None:
+            return bool(result)
+    return False
+
+
 def _warn_ignored_hooks(mod: types.ModuleType, path: pathlib.Path) -> None:
     if os.environ.get("GGT_PARALLEL") == "1":
         # A worker re-importing the conftest: the runner process
@@ -210,7 +327,12 @@ def _warn_ignored_hooks(mod: types.ModuleType, path: pathlib.Path) -> None:
     hooks = sorted(
         name
         for name, value in vars(mod).items()
-        if name.startswith("pytest_") and callable(value)
+        if name.startswith("pytest_")
+        and callable(value)
+        and not (
+            name == _IGNORE_COLLECT_HOOK
+            and _supported_ignore_collect_hook(value)
+        )
     )
     if hooks:
         warnings.warn(
