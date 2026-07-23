@@ -107,7 +107,7 @@ jobs:
         id: pinned
         uses: ./
         with:
-          version: "1.1.0"
+          version: "1.2.0"
           extras: "pytest"
           enable-cache: false
 
@@ -116,7 +116,7 @@ jobs:
           GGT_VERSION: ${{ steps.pinned.outputs.ggt-version }}
         shell: bash
         run: |
-          test "$GGT_VERSION" = "1.1.0"
+          test "$GGT_VERSION" = "1.2.0"
           python -c "import pytest"
           ggt --version
 
