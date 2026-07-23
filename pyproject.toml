@@ -53,6 +53,7 @@ check = [
     "lograil>=0.6.0",
     "mypy==1.17.1",
     "poethepoet>=0.48.0",
+    "readme-renderer==45.0",
     "ruff==0.12.10",
     "tox>=4",
     "tox-uv-bare",
@@ -164,6 +165,9 @@ cmd = "ruff format src tests"
 
 [tool.poe.tasks.lint-zizmor]
 cmd = "zizmor --offline .github/workflows action.yml"
+
+[tool.poe.tasks.lint-readme]
+cmd = "python scripts/check-readme.py"
 
 [tool.poe.tasks.typecheck-mypy]
 cmd = "mypy"
