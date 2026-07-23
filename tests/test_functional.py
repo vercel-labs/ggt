@@ -1185,12 +1185,15 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.skip_if_multiprocessing_blocked(result)
         await self.assert_success(result)
-        self.assertIn("tests ran: 5", result.output)
+        self.assertIn("tests ran: 7", result.output)
         # Fixture warnings from the parent-side session setup are
         # summarized like test warnings, not interleaved with the
         # progress output.
         self.assertIn("WARNING: test session setup", result.output)
         self.assertIn("could not be pickled", result.output)
+        self.assertNotIn("local_unpickleable_session'", result.output)
+        self.assertNotIn("local_dependent'", result.output)
+        self.assertNotIn("local_module'", result.output)
 
         recorded = events.read_text(encoding="utf-8").splitlines()
         # Session- and module-scoped fixtures execute exactly once (in
@@ -1202,6 +1205,9 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         # The unpickleable fixture ran in the parent and then again in
         # the worker that executed its test.
         self.assertEqual(recorded.count("unpickleable-setup"), 2)
+        # The tests compare process IDs to prove local fixtures, and fixtures
+        # depending on them, did not execute in the parent. Both decorator
+        # orders are covered.
 
     async def test_pytest_compat_shared_fixtures_sequential(self) -> None:
         events = self.project / "shared-events-seq.txt"
@@ -1214,7 +1220,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
         )
         await self.assert_success(result)
-        self.assertIn("tests ran: 5", result.output)
+        self.assertIn("tests ran: 7", result.output)
 
         recorded = events.read_text(encoding="utf-8").splitlines()
         self.assertEqual(recorded.count("session-setup"), 1)
@@ -1638,7 +1644,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             )
             self.skip_if_multiprocessing_blocked(result)
             await self.assert_success(result)
-            self.assertIn("tests ran: 5", result.output)
+            self.assertIn("tests ran: 7", result.output)
 
             recorded = events.read_text(encoding="utf-8").splitlines()
             # Shared fixtures keep their once-in-parent semantics on

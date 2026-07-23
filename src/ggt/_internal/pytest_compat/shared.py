@@ -206,11 +206,41 @@ def _walk_shared_defs(
     roots: list[tuple[str, int]],
 ) -> set[fixture_engine.FixtureDef]:
     """Transitively reachable session/module-scope fixture defs."""
+    reached = fixture_engine.walk_fixture_defs(registry, roots)
+    dependencies: dict[
+        fixture_engine.FixtureDef, set[fixture_engine.FixtureDef]
+    ] = {}
+    for fdef, index in reached:
+        dependencies[fdef] = set()
+        for argname in fdef.argnames:
+            if argname == "request":
+                continue
+            start = index + 1 if argname == fdef.name else 0
+            found = registry.lookup(argname, start)
+            if found is not None:
+                dependencies[fdef].add(found[0])
+
+    # Propagate locality to dependents. Otherwise a local fixture could
+    # still execute in the parent while setting up a shared fixture that
+    # depends on it. Iterate to a fixed point because a fixture definition
+    # may have been reached earlier through a different root.
+    local = {fdef for fdef, _index in reached if fdef.local}
+    while True:
+        dependents = {
+            fdef
+            for fdef, deps in dependencies.items()
+            if fdef not in local and not deps.isdisjoint(local)
+        }
+        if not dependents:
+            break
+        local.update(dependents)
+
     return {
         fdef
-        for fdef, _index in fixture_engine.walk_fixture_defs(registry, roots)
+        for fdef, _index in reached
         if (
-            fdef.scope in {"session", "module"}
+            fdef not in local
+            and fdef.scope in {"session", "module"}
             and not fdef.needs_instance
             and not fdef.is_async
             and fdef.params is None
