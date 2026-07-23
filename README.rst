@@ -654,9 +654,9 @@ shard balancing and parallel scheduling stay warm from run to run:
      - uses: actions/setup-python@v5
        with:
          python-version: '3.12'
-     - uses: vercel-labs/ggt@v1.1.1  # pin an exact release tag or SHA
+     - uses: vercel-labs/ggt@v1.2.0  # pin an exact release tag or SHA
        with:
-         version: '1.1.1'                          # optional, default: latest
+         version: '1.2.0'                          # optional, default: latest
          extras: 'coverage'                        # optional
          cache-suffix: shard-${{ matrix.shard }}   # per-shard timing data
      - run: ggt -s ${{ matrix.shard }}/4
