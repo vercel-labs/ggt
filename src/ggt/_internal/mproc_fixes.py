@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 _orig_pool_worker_handler: Callable[..., Any] | None = None
 _orig_pool_join_exited_workers: Callable[..., Any] | None = None
+_orig_popen_forkserver_launch: Callable[..., Any] | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,43 @@ def _restore_Traceback() -> None:
     return None
 
 
+def forkserver_popen_launch_with_retry(self: Any, process_obj: Any) -> None:
+    """Retry a worker launch that raced a dying fork server.
+
+    ``connect_to_new_process`` checks the server's liveness with a
+    non-blocking ``waitpid`` and restarts a reaped corpse, but a server
+    that dies *between* that check and the handshake (or mid-handshake)
+    surfaces as ``EOFError``/``ConnectionError`` — on Python <= 3.13 as
+    ``RuntimeError`` from ``reduction.sendfds`` — and, once its
+    listening socket is unlinked, ``FileNotFoundError``.  The retry
+    re-enters ``ensure_running``, which by then observes the death and
+    starts a fresh server, so a transient server loss costs one worker
+    respawn instead of the entire run.  (An unrelated ``RuntimeError``
+    still propagates, merely after the retries fail too.)
+    """
+    assert _orig_popen_forkserver_launch is not None
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            _orig_popen_forkserver_launch(self, process_obj)
+            return
+        except (
+            EOFError,
+            ConnectionError,
+            FileNotFoundError,
+            RuntimeError,
+        ):
+            if attempt == attempts:
+                raise
+            logger.debug(
+                "fork server connection failed, retrying worker launch "
+                "(attempt %d/%d)",
+                attempt,
+                attempts,
+            )
+            time.sleep(0.05 * attempt)
+
+
 def forkserver_usable() -> bool:
     """Whether the fork server's listener socket can be created.
 
@@ -176,7 +214,7 @@ def forkserver_usable() -> bool:
 
 
 def patch_multiprocessing(*, debug: bool) -> None:
-    global _orig_pool_worker_handler, _orig_pool_join_exited_workers  # noqa: PLW0603
+    global _orig_pool_worker_handler, _orig_pool_join_exited_workers, _orig_popen_forkserver_launch  # noqa: PLW0603, E501
 
     if debug:
         multiprocessing.util.log_to_stderr(logging.DEBUG)
@@ -193,6 +231,18 @@ def patch_multiprocessing(*, debug: bool) -> None:
     else:
         method = "spawn"
     multiprocessing.set_start_method(method)
+
+    if method == "forkserver":
+        # Imported lazily (and aliased so the plain "multiprocessing"
+        # name above stays module-global): the module refuses to import
+        # on platforms without fd passing, which is also why
+        # "forkserver" is absent from get_all_start_methods() there.
+        from multiprocessing import popen_forkserver  # noqa: PLC0415
+
+        _orig_popen_forkserver_launch = popen_forkserver.Popen._launch  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+        popen_forkserver.Popen._launch = (  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+            forkserver_popen_launch_with_retry
+        )
 
     # Add the ability to do clean shutdown of the worker.
     multiprocessing.pool.worker = multiprocessing_pool_worker  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]

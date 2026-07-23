@@ -912,6 +912,231 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proc.returncode, 0, stderr.decode())
         self.assertEqual(stdout.decode().strip(), "spawn")
 
+    async def test_preload_survives_foreign_module_origins(self) -> None:
+        # A preload list whose recorded origins do not match what the
+        # fork server resolves must degrade gracefully: mismatched
+        # modules are evicted, but the preload module itself — whose
+        # import is still executing — must never be, since removing a
+        # mid-import module from sys.modules raises KeyError inside
+        # importlib and kills the fork server (every later worker
+        # spawn then fails with EOFError at pool startup).
+        state = {
+            "modules": [
+                ["colorsys", "/bogus/colorsys.py"],
+                # The preload module's parent packages must survive
+                # origin validation too: importlib binds the child
+                # attribute through sys.modules[parent] right after
+                # the import that is executing this very validation.
+                ["ggt", "/bogus/__init__.py"],
+                ["ggt._internal", "/bogus/_internal/__init__.py"],
+                # Evicting any other ggt module would split ggt into
+                # two generations of module objects (see _preload).
+                ["ggt._internal.loader", "/bogus/loader.py"],
+                ["ggt._internal.preload", "/bogus/preload.py"],
+            ],
+        }
+        script = self.write(
+            self.project / "probe.py",
+            "import sys\n"
+            "import ggt._internal.preload\n"
+            "assert 'ggt' in sys.modules\n"
+            "assert 'ggt._internal' in sys.modules\n"
+            "assert 'ggt._internal.loader' in sys.modules\n"
+            "assert 'ggt._internal.preload' in sys.modules\n"
+            "assert 'colorsys' not in sys.modules, 'not evicted'\n"
+            "print('ok')\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(GGT_PRELOAD_MODULES=json.dumps(state)),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout.decode().strip(), "ok")
+
+    async def test_preload_cache_from_foreign_environment_is_ignored(
+        self,
+    ) -> None:
+        # A cache recorded under a different interpreter, virtualenv,
+        # PYTHONPATH, or ggt checkout must be treated as absent rather
+        # than replayed into the fork server.
+        script = self.write(
+            self.project / "probe.py",
+            "import json\n"
+            "import os\n"
+            "import pathlib\n"
+            "from ggt._internal import preload\n"
+            "\n"
+            "orig_pythonpath = os.environ.get('PYTHONPATH', '')\n"
+            "preload.save_module_cache()\n"
+            "assert preload.load_module_cache() is not None\n"
+            "path = preload._cache_path()\n"
+            "assert preload.env_fingerprint() in path.name\n"
+            "# A different environment derives a different filename,\n"
+            "# so a foreign cache is never even read.\n"
+            "os.environ['PYTHONPATH'] = '/somewhere/else'\n"
+            "assert preload._cache_path() != path\n"
+            "assert preload.load_module_cache() is None\n"
+            "os.environ['PYTHONPATH'] = orig_pythonpath\n"
+            "assert preload.load_module_cache() is not None\n"
+            "# The payload also records the full fingerprint and it is\n"
+            "# verified at load time (e.g. a cache file copied between\n"
+            "# environments).\n"
+            "data = json.loads(path.read_text())\n"
+            "data['env']['pythonpath'] = '/somewhere/else'\n"
+            "path.write_text(json.dumps(data))\n"
+            "assert preload.load_module_cache() is None\n"
+            "# Caches from any other format version are simply\n"
+            "# invisible, wherever they are.\n"
+            "pristine = json.dumps(preload.compute_preload_state())\n"
+            "path.unlink()\n"
+            "root = pathlib.Path(preload.CACHE_DIR)\n"
+            "(root / path.name).write_text(pristine)\n"
+            "other = root / f'v{preload.CACHE_VERSION + 1}'\n"
+            "other.mkdir()\n"
+            "(other / path.name).write_text(pristine)\n"
+            "assert preload.load_module_cache() is None\n"
+            "print('ok')\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout.decode().strip(), "ok")
+
+    async def test_forkserver_worker_launch_retries_after_server_death(
+        self,
+    ) -> None:
+        # A fork server dying between the liveness check and the
+        # connection handshake surfaces as EOFError from Popen._launch;
+        # the patched launch must retry (re-entering ensure_running,
+        # which restarts the server) and only give up when the failure
+        # is persistent.
+        script = self.write(
+            self.project / "probe.py",
+            "from ggt._internal import mproc_fixes\n"
+            "\n"
+            "calls = []\n"
+            "def flaky(self, process_obj):\n"
+            "    calls.append(1)\n"
+            "    if len(calls) == 1:\n"
+            "        raise EOFError\n"
+            "    if len(calls) == 2:\n"
+            "        # Python <= 3.13: a dying server surfaces as\n"
+            "        # RuntimeError from reduction.sendfds.\n"
+            "        raise RuntimeError(\n"
+            "            'did not receive acknowledgement of fd'\n"
+            "        )\n"
+            "\n"
+            "mproc_fixes._orig_popen_forkserver_launch = flaky\n"
+            "mproc_fixes.forkserver_popen_launch_with_retry(None, None)\n"
+            "assert len(calls) == 3, calls\n"
+            "\n"
+            "def dead(self, process_obj):\n"
+            "    raise EOFError\n"
+            "\n"
+            "mproc_fixes._orig_popen_forkserver_launch = dead\n"
+            "try:\n"
+            "    mproc_fixes.forkserver_popen_launch_with_retry(None, None)\n"
+            "except EOFError:\n"
+            "    print('ok')\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout.decode().strip(), "ok")
+
+    async def test_running_times_log_write_skipped_while_locked(
+        self,
+    ) -> None:
+        # Concurrent ggt runs share the running-times log; a run that
+        # finds it locked must skip the end-of-run rewrite (keeping
+        # the file intact) instead of racing the lock holder.
+        try:
+            import fcntl
+        except ImportError:
+            self.skipTest("flock is not available on this platform")
+
+        self.write(
+            self.tests_dir / "test_t.py",
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_a(self): pass\n",
+        )
+        log = self.project / "times.csv"
+        sentinel = b"held,1.0,1\r\n"
+        log.write_bytes(sentinel)
+
+        with open(log, "r+", encoding="utf-8") as holder:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            result = await self.run_ggt(
+                "--running-times-log",
+                str(log),
+                "-j1",
+                "--output-format",
+                "simple",
+            )
+            await self.assert_success(result)
+            self.assertEqual(log.read_bytes(), sentinel)
+
+        # Lock released: the same invocation updates the log.
+        result = await self.run_ggt(
+            "--running-times-log",
+            str(log),
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        content = log.read_text()
+        self.assertIn("test_a", content)
+        # The sentinel entry read from the log survives the rewrite.
+        self.assertIn("held", content)
+
+    async def test_parallel_run_survives_poisoned_preload_cache(
+        self,
+    ) -> None:
+        # End-to-end: a cache whose module origins are all wrong (but
+        # whose environment fingerprint matches, so it is actually
+        # replayed) must not take down a parallel run.
+        self.write(
+            self.tests_dir / "test_pre.py",
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_a(self): pass\n"
+            "    def test_b(self): pass\n",
+        )
+        result = await self.run_ggt("--preload", "-j2")
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+
+        [cache] = (self.project / ".ggt_cache" / "v1").glob("preload-*.json")
+        data = json.loads(cache.read_text())
+        data["modules"] = [
+            [name, "/bogus" + origin] for name, origin in data["modules"]
+        ]
+        cache.write_text(json.dumps(data))
+
+        result = await self.run_ggt("--preload", "-j2")
+        await self.assert_success(result)
+
     async def test_parallel_failfast_stops_after_first_failure(self) -> None:
         self.use_fixture("failfast")
         result = await self.run_ggt(
@@ -1656,7 +1881,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recorded.count("module-a-setup"), 1, run_index)
 
         self.assertTrue(
-            (self.project / ".ggt_cache" / "preload.json").exists()
+            any((self.project / ".ggt_cache" / "v1").glob("preload-*.json"))
         )
 
     async def test_pytest_compat_unsupported_features_are_reported(

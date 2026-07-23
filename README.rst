@@ -116,7 +116,9 @@ Test Selection
 
 ``--preload/--no-preload``
    Warm up the worker fork server (enabled by default). ggt records
-   the test suite's dependency graph in ``.ggt_cache/preload.json``
+   the test suite's dependency graph in a per-environment
+   ``preload-*.json`` in the cache
+   directory (a format-versioned subdirectory of ``.ggt_cache``)
    after discovery; on the next run the fork server imports that
    module list concurrently with test discovery, freezes the
    resulting object graph (``gc.freeze()``) to maximize
