@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright Vercel, Inc. and the contributors.
 
+import importlib.metadata
+
 from ._internal.decorators import (
     async_timeout,
     not_implemented,
@@ -20,4 +22,10 @@ __all__ = (
     "xfail",
 )
 
-__version__ = "1.1.1"
+# The version is derived from the git tag at build time
+# (uv-dynamic-versioning); releases are cut by pushing a tag, with no
+# version-bump commit.
+try:
+    __version__ = importlib.metadata.version("ggt")
+except importlib.metadata.PackageNotFoundError:  # uninstalled source tree
+    __version__ = "0+unknown"

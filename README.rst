@@ -705,35 +705,37 @@ Optional dependencies:
 - coverage >= 7.4 (``ggt[coverage]``)
 - pytest >= 7.3.2, < 10 (``ggt[pytest]``, enables pytest compatibility mode)
 
-Git Hooks
-=========
+Development
+===========
 
-Install the repository hooks with:
-
-.. code-block:: bash
-
-   scripts/install-hooks.sh
-
-This sets ``core.hooksPath`` to ``.githooks``.
-
-The pre-commit hook checks the staged index, not unstaged working-tree files.
-It creates a temporary checkout from the Git index and runs:
+Set up a development environment and the repository git hooks with:
 
 .. code-block:: bash
 
-   ruff format --check src tests
-   ruff check src/ggt pyproject.toml
-   ggt tests --output-format simple
+   uv sync --dev
+   uv run poe setup
 
-The pre-push hook runs broader checks against the working tree:
+Day-to-day tasks are driven by `poethepoet <https://poethepoet.natn.io>`_:
 
 .. code-block:: bash
 
-   uv run --dev --no-sync ruff format --check src tests
-   uv run --dev --no-sync ruff check src/ggt pyproject.toml
-   uv run --dev --no-sync mypy
-   uv run --dev --no-sync ty check
-   uv run --dev --no-sync ggt tests --output-format simple
+   uv run poe lint                # ruff check/format, zizmor
+   uv run poe typecheck           # mypy, ty
+   uv run poe test                # ggt's own test suite
+   uv run poe qa                  # all of the above
+   uv run poe fix                 # apply ruff autofixes and formatting
+   uv run poe test-python-matrix  # test on every supported Python (tox)
+
+Task output is rendered as a live status dashboard by lograil_, which
+consumes ggt's own ``--output-format=json`` stream for the test tasks.
+Pass ``-v`` to stream plain output instead.
+
+.. _lograil: https://github.com/vercel-labs/lograil
+
+``poe setup`` registers the hook scripts in ``scripts/githooks/`` via
+git's configuration-based hooks (see ``scripts/sync-githooks.py``): the
+pre-commit hook runs lint and typechecks, and the pre-push hook
+additionally runs the test suite.
 
 License
 =======

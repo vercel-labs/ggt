@@ -1,9 +1,0 @@
-#!/bin/sh
-
-set -e
-
-uv run --dev --no-sync ruff format --check src tests
-uv run --dev --no-sync ruff check src/ggt pyproject.toml
-uv run --dev --no-sync mypy
-uv run --dev --no-sync ty check
-uv run --dev --no-sync ggt tests --output-format simple
