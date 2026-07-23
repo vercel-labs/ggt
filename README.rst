@@ -131,7 +131,7 @@ Test Selection
 Output and Reporting
 --------------------
 
-``--output-format [auto|simple|stacked|verbose|silent]``
+``--output-format [auto|simple|stacked|verbose|silent|json]``
    Control test progress output style:
 
    - ``auto``: Automatically choose based on terminal capabilities
@@ -140,6 +140,8 @@ Output and Reporting
    - ``verbose``: Detailed output for each test
    - ``silent``: Suppress progress output while still printing the final
      result summary
+   - ``json``: Machine-readable NDJSON events on stdout (never chosen
+     by ``auto``; see `JSON Format`_)
 
 ``--warnings/--no-warnings``
    Enable or disable warning capture and reporting (enabled by default).
@@ -506,6 +508,51 @@ Silent Format
 -------------
 Suppress progress output and print only the final summary, failures, errors,
 and warnings.
+
+JSON Format
+-----------
+Machine-readable output: one JSON object per line (NDJSON) on stdout,
+with all human-oriented output suppressed.  Each line is a
+lograil_-compatible log entry carrying the run stage, status, and
+progress, so a live progress bar is one pipe away:
+
+.. code-block:: bash
+
+   ggt tests --output-format=json | lograil
+
+.. _lograil: https://github.com/vercel/lograil
+
+Every event carries ``message``/``levelname``, the stage metadata
+``lograil.stage`` (``collect``, ``setup``, ``run``, ``teardown``,
+``summary``) and ``lograil.stage.status`` (``started``, ``running``,
+``finished``, ``failed``), and ``lograil.progress.*`` counters —
+``completed``/``total`` during the run stage (``total`` is omitted
+while it is still unknown, e.g. during collection).  Tool-specific
+details ride along under ``ggt.*`` keys:
+
+.. code-block:: json
+
+   {"message": "FAILED tests.test_app.TestApp.test_x: AssertionError: 1 != 2",
+    "levelname": "ERROR", "lograil.stage": "run",
+    "lograil.stage.status": "running",
+    "lograil.progress.completed": 42, "lograil.progress.total": 98,
+    "lograil.progress.description": "tests.test_app.TestApp.test_x",
+    "lograil.progress.process": "ggt", "lograil.progress.subject": "run",
+    "ggt.test": "tests.test_app.TestApp.test_x", "ggt.marker": "failed",
+    "ggt.traceback": "Traceback (most recent call last): ..."}
+
+Per-test completion events are ``INFO`` (transient in progress-bar
+consumers); failures, errors, and unexpected successes are ``ERROR`` or
+``WARNING`` with a concise one-line reason in ``message`` and the full
+traceback in ``ggt.traceback``.  After the run, one message-less event
+per failed case carries the complete captured detail (traceback,
+stdout/stderr) under ``ggt.detail``, followed by a final event with
+aggregate counts and timings under ``ggt.summary``.
+
+The json format requires output capture (it is incompatible with
+``--no-capture``) so that test output cannot corrupt the stream; the
+captured output of failing tests is included in their ``ggt.detail``
+event instead.
 
 Performance and Optimization
 ============================

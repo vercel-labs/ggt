@@ -529,7 +529,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_output_formats_smoke(self) -> None:
         self.use_fixture("basic")
-        for fmt in ["simple", "verbose", "stacked", "silent"]:
+        for fmt in ["simple", "verbose", "stacked", "silent", "json"]:
             with self.subTest(fmt=fmt):
                 result = await self.run_ggt(
                     "tests/test_basic.py",
@@ -541,6 +541,188 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("SUCCESS", result.output)
                 if fmt == "verbose":
                     self.assertIn("test_pass_a", result.output)
+
+    def parse_ndjson(self, result: RunResult) -> list[dict]:
+        entries = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            self.assertIsInstance(entry, dict, line)
+            self.assertIn("lograil.stage", entry, line)
+            entries.append(entry)
+        return entries
+
+    async def test_json_output_emits_valid_ndjson(self) -> None:
+        self.use_fixture("outcomes")
+        for jobs in ("-j1", "-j2"):
+            with self.subTest(jobs=jobs):
+                result = await self.run_ggt(
+                    "tests/test_outcomes.py",
+                    jobs,
+                    "--output-format",
+                    "json",
+                )
+                self.skip_if_multiprocessing_blocked(result)
+                await self.assert_failure(result)
+                entries = self.parse_ndjson(result)
+
+                # Stages appear in order.
+                stage_order = []
+                for entry in entries:
+                    stage = entry["lograil.stage"]
+                    if not stage_order or stage_order[-1] != stage:
+                        stage_order.append(stage)
+                self.assertEqual(
+                    [s for s in stage_order if s != "session"],
+                    ["collect", "setup", "run", "teardown", "summary"],
+                )
+
+                # The run total matches the per-test event count, and
+                # progress is monotonic.
+                run_started = next(
+                    e
+                    for e in entries
+                    if e["lograil.stage"] == "run"
+                    and e["lograil.stage.status"] == "started"
+                )
+                total = run_started["lograil.progress.total"]
+                test_events = [e for e in entries if "ggt.test" in e]
+                self.assertEqual(len(test_events), total)
+                completed = [
+                    e["lograil.progress.completed"] for e in test_events
+                ]
+                self.assertEqual(completed, sorted(completed))
+                self.assertEqual(completed[-1], total)
+
+                # A failing test yields an ERROR event with a traceback
+                # and a concise message.
+                failed = next(
+                    e
+                    for e in test_events
+                    if e["ggt.test"].endswith(".test_failure")
+                )
+                self.assertEqual(failed["levelname"], "ERROR")
+                self.assertIn("planned failure", failed["ggt.traceback"])
+                self.assertIn("AssertionError", failed["message"])
+
+                # Per-case detail events carry data but no message.
+                details = [e for e in entries if "ggt.detail" in e]
+                self.assertTrue(details)
+                self.assertTrue(all("message" not in e for e in details))
+                self.assertTrue(
+                    any(
+                        d["ggt.detail"]["id"].endswith(".test_failure")
+                        for d in details
+                    )
+                )
+
+                # The summary event matches the exit code.
+                summary = entries[-1]
+                self.assertEqual(summary["lograil.stage"], "summary")
+                self.assertFalse(summary["ggt.summary"]["was_successful"])
+                self.assertEqual(summary["levelname"], "ERROR")
+                self.assertTrue(summary["lograil.progress.clear_label"])
+
+    async def test_json_output_survives_test_stdout_capture(self) -> None:
+        # A test printing to the real fd 1 must not corrupt the NDJSON
+        # stream (the sequential suite captures fd 1 in-process).
+        self.use_fixture("noisy")
+        result = await self.run_ggt(
+            "tests/test_noisy.py",
+            "-j1",
+            "--output-format",
+            "json",
+        )
+        await self.assert_failure(result)
+        self.assertNotIn("NOISY-PASS-STDOUT-MARKER\n", result.stdout)
+        entries = self.parse_ndjson(result)
+        # The captured output still surfaces in the failure detail.
+        detail = next(e["ggt.detail"] for e in entries if "ggt.detail" in e)
+        self.assertIn("NOISY-FAIL-STDOUT-MARKER", detail["stdout"] or "")
+
+    async def test_json_output_list(self) -> None:
+        self.use_fixture("basic")
+        result = await self.run_ggt(
+            "tests/test_basic.py",
+            "--list",
+            "--output-format",
+            "json",
+        )
+        await self.assert_success(result)
+        entries = self.parse_ndjson(result)
+        listed = [e["ggt.test"] for e in entries if "ggt.test" in e]
+        self.assertEqual(len(listed), 5)
+        self.assertIn("tests.test_basic.Alpha.test_pass_a", listed)
+
+    async def test_json_output_rejects_no_capture(self) -> None:
+        self.use_fixture("basic")
+        result = await self.run_ggt(
+            "tests/test_basic.py",
+            "--no-capture",
+            "--output-format",
+            "json",
+        )
+        await self.assert_failure(result)
+        self.assertIn("cannot use --no-capture", result.stderr)
+
+    async def test_json_output_sharding(self) -> None:
+        self.use_fixture("sharding")
+        for shard in ("1/2", "2/2"):
+            with self.subTest(shard=shard):
+                result = await self.run_ggt(
+                    "tests/test_sharding.py",
+                    "-j1",
+                    "-s",
+                    shard,
+                    "--output-format",
+                    "json",
+                )
+                await self.assert_success(result)
+                entries = self.parse_ndjson(result)
+                run_started = next(
+                    e
+                    for e in entries
+                    if e["lograil.stage"] == "run"
+                    and e["lograil.stage.status"] == "started"
+                )
+                self.assertEqual(run_started["ggt.shard"], shard)
+                collected = next(
+                    e
+                    for e in entries
+                    if e["lograil.stage"] == "collect"
+                    and e["lograil.stage.status"] == "finished"
+                )["lograil.progress.completed"]
+                # The announced run total is the shard's post-shard
+                # subset — smaller than the collected count — and it
+                # matches the per-test events actually emitted.
+                total = run_started["lograil.progress.total"]
+                self.assertLess(total, collected)
+                self.assertGreater(total, 0)
+                test_events = [e for e in entries if "ggt.test" in e]
+                self.assertEqual(len(test_events), total)
+
+    async def test_json_output_repeat(self) -> None:
+        self.use_fixture("basic")
+        result = await self.run_ggt(
+            "tests/test_basic.py",
+            "-j1",
+            "--repeat",
+            "2",
+            "--output-format",
+            "json",
+        )
+        await self.assert_success(result)
+        entries = self.parse_ndjson(result)
+        run_starts = [
+            e
+            for e in entries
+            if e["lograil.stage"] == "run"
+            and e["lograil.stage.status"] == "started"
+        ]
+        self.assertEqual(len(run_starts), 2)
+        summaries = [e for e in entries if "ggt.summary" in e]
+        self.assertEqual(len(summaries), 2)
 
     async def test_quiet_verbose_and_shuffle_smoke(self) -> None:
         self.use_fixture("modes")
