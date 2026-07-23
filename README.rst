@@ -520,7 +520,7 @@ progress, so a live progress bar is one pipe away:
 
    ggt tests --output-format=json | lograil
 
-.. _lograil: https://github.com/vercel/lograil
+.. _lograil: https://github.com/vercel-labs/lograil
 
 Every event carries ``message``/``levelname``, the stage metadata
 ``lograil.stage`` (``collect``, ``setup``, ``run``, ``teardown``,
@@ -788,8 +788,6 @@ Day-to-day tasks are driven by `poethepoet <https://poethepoet.natn.io>`_:
 Task output is rendered as a live status dashboard by lograil_, which
 consumes ggt's own ``--output-format=json`` stream for the test tasks.
 Pass ``-v`` to stream plain output instead.
-
-.. _lograil: https://github.com/vercel-labs/lograil
 
 ``poe setup`` registers the hook scripts in ``scripts/githooks/`` via
 git's configuration-based hooks (see ``scripts/sync-githooks.py``): the

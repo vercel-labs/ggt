@@ -107,7 +107,12 @@ def lint_commands() -> tuple[Command, ...]:
             "lint",
         ),
         Command(
-            "zizmor", ("zizmor", "--offline", ".github/workflows"), "lint"
+            "zizmor",
+            ("zizmor", "--offline", ".github/workflows", "action.yml"),
+            "lint",
+        ),
+        Command(
+            "readme", ("python", "scripts/check-readme.py"), "lint"
         ),
     )
 

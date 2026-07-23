@@ -29,6 +29,7 @@ jobs:
       - run: uv run --frozen --no-default-groups --group=check zizmor .github/workflows action.yml
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: uv run --frozen --no-default-groups --group=check python scripts/check-readme.py
 
   tests:
     strategy:
