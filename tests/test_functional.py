@@ -685,6 +685,149 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("FAILURE", stdout.decode("utf-8", "replace"))
 
+    async def run_ggt_pty(self, *args: str) -> RunResult:
+        """Run ggt attached to a pty and replay the ANSI output.
+
+        Returns what a terminal would display after the run, so tests
+        can assert on the *rendered* state of cursor-movement-based
+        output (the stacked renderer), not the raw escape stream.
+        """
+        import fcntl
+        import pty
+        import re
+        import struct
+        import termios
+
+        master, slave = pty.openpty()
+        fcntl.ioctl(
+            slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0)
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "ggt",
+            *args,
+            cwd=self.project,
+            env=self.env(),
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+        )
+        os.close(slave)
+        loop = asyncio.get_running_loop()
+        raw = b""
+        while True:
+            chunk = await loop.run_in_executor(None, self._read_pty, master)
+            if not chunk:
+                break
+            raw += chunk
+        os.close(master)
+        returncode = await proc.wait()
+        text = raw.decode("utf-8", errors="replace")
+
+        # Minimal terminal emulation, just enough for the renderer:
+        # \r, \n, cursor-up (CSI A) and erase-below (CSI J).
+        screen, row, col = [""], 0, 0
+        for m in re.finditer(
+            r"\x1b\[([0-9;?]*)([A-Za-z])|\r\n|\n|\r|[^\x1b\r\n]+", text
+        ):
+            esc_args, esc_cmd = m.group(1), m.group(2)
+            tok = m.group(0)
+            if esc_cmd == "A":
+                row = max(0, row - int(esc_args or "1"))
+            elif esc_cmd == "D":
+                col = max(0, col - int(esc_args or "1"))
+            elif esc_cmd == "J":
+                screen[row] = screen[row][:col]
+                del screen[row + 1 :]
+            elif esc_cmd == "K":
+                screen[row] = screen[row][:col]
+            elif esc_cmd:
+                pass
+            elif tok in ("\n", "\r\n"):
+                row += 1
+                col = 0
+                if row == len(screen):
+                    screen.append("")
+            elif tok == "\r":
+                col = 0
+            else:
+                line = screen[row].ljust(col)
+                screen[row] = line[:col] + tok + line[col + len(tok) :]
+                col += len(tok)
+
+        rendered = "\n".join(line.rstrip() for line in screen)
+        return RunResult(returncode, rendered, "")
+
+    @staticmethod
+    def _read_pty(fd: int) -> bytes:
+        try:
+            return os.read(fd, 65536)
+        except OSError:
+            return b""
+
+    @unittest.skipIf(os.name == "nt", "requires a pty")
+    async def test_stacked_output_renders_cleanly(self) -> None:
+        self.use_fixture("noisy")
+        result = await self.run_ggt_pty(
+            "tests", "-j2", "--output-format", "stacked"
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_failure(result)  # the noisy fixture has 1 failure
+
+        rendered = result.stdout
+        self.assertIn("Progress: 2/2 tests.", rendered)
+        # The module progress line is rendered exactly once (stray
+        # test output used to corrupt the repaint accounting and
+        # duplicate it).
+        module_lines = [
+            line
+            for line in rendered.splitlines()
+            if line.startswith("tests/test_noisy.py")
+        ]
+        self.assertEqual(len(module_lines), 1, rendered)
+        # The final (shorter) frame must not leave a blank block
+        # behind: no run of 2+ empty lines anywhere in the rendered
+        # output.
+        self.assertNotIn("\n\n\n", rendered, rendered)
+        # Stage status lines are transient on a terminal: shown while
+        # the stage runs, erased when it completes.
+        self.assertNotIn("Setting up", rendered, rendered)
+        self.assertNotIn("Tearing down", rendered, rendered)
+
+    async def test_output_capture_default(self) -> None:
+        self.use_fixture("noisy")
+        for jobs in ("-j1", "-j2"):
+            with self.subTest(jobs=jobs):
+                result = await self.run_ggt(
+                    "tests", jobs, "--output-format", "simple"
+                )
+                if jobs != "-j1":
+                    self.skip_if_multiprocessing_blocked(result)
+                await self.assert_failure(result)
+                # Output of the passing test is captured and discarded,
+                # including logging through a handler that holds a
+                # direct stream reference (fd-level capture).
+                self.assertNotIn("NOISY-PASS-STDOUT-MARKER", result.output)
+                self.assertNotIn("NOISY-PASS-STDERR-MARKER", result.output)
+                self.assertNotIn("NOISY-PASS-LOG-MARKER", result.output)
+                # The failing test's captured output is shown in its
+                # failure report.
+                self.assertIn("Captured stdout:", result.output)
+                self.assertIn("NOISY-FAIL-STDOUT-MARKER", result.output)
+                self.assertIn("Captured stderr:", result.output)
+                self.assertIn("NOISY-FAIL-STDERR-MARKER", result.output)
+
+    async def test_output_capture_disabled(self) -> None:
+        self.use_fixture("noisy")
+        result = await self.run_ggt(
+            "tests", "-j2", "--no-capture", "--output-format", "simple"
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_failure(result)
+        # Test output passes through to the terminal.
+        self.assertIn("NOISY-PASS-STDOUT-MARKER", result.output)
+        self.assertIn("NOISY-PASS-LOG-MARKER", result.output)
+        self.assertNotIn("Captured stdout:", result.output)
+
     async def test_pytest_compat_discovery_and_listing(self) -> None:
         self.use_fixture("pytestcompat")
         listed = await self.run_ggt("ptests", "--list")
@@ -770,6 +913,10 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.skip_if_multiprocessing_blocked(result)
         await self.assert_success(result)
         self.assertIn("tests ran: 5", result.output)
+        # Fixture warnings from the parent-side session setup are
+        # summarized like test warnings, not interleaved with the
+        # progress output.
+        self.assertIn("WARNING: test session setup", result.output)
         self.assertIn("could not be pickled", result.output)
 
         recorded = events.read_text(encoding="utf-8").splitlines()
@@ -901,10 +1048,32 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.assert_success(result)
         self.assertIn("tests ran: 12", result.output)
-        # The inert conftest plugin hook is reported.
+        # The inert conftest plugin hook is reported, in the warning
+        # summary, exactly once.
+        self.assertIn("WARNING: test collection", result.output)
         self.assertIn("ignoring: pytest_collection_modifyitems", result.output)
         # capsys.disabled() writes to the real stdout.
         self.assertIn("GGT-DISABLED-MARKER", result.output)
+
+    async def test_pytest_compat_hook_warning_reported_once(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "extras",
+            "-j2",
+            "-X",
+            "color=blue",
+            "--output-format",
+            "simple",
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        # Workers re-import the conftest but must not repeat the
+        # ignored-hooks warning already reported at collection.
+        self.assertEqual(
+            result.output.count("defines pytest plugin hooks"),
+            1,
+            result.output,
+        )
 
     async def test_pytest_compat_mark_selection(self) -> None:
         self.use_fixture("pytestcompat")

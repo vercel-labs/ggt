@@ -144,6 +144,15 @@ Output and Reporting
 ``--warnings/--no-warnings``
    Enable or disable warning capture and reporting (enabled by default).
 
+``--capture/--no-capture``
+   Capture test stdout and stderr (enabled by default).  Like pytest,
+   ggt captures at the file-descriptor level, so output from
+   ``print()``, the ``logging`` module and subprocesses is all caught
+   and attributed to the test that produced it; the captured output of
+   failing tests is shown in their failure report.  Use
+   ``--no-capture`` to let test output pass through to the terminal
+   (this can garble the progress display).
+
 ``--result-log FILEPATH``
    Write test results to a JSON log file. Use ``%TIMESTAMP%`` for automatic
    timestamping. Result logs include outcome details and timing fields such

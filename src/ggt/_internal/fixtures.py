@@ -54,37 +54,37 @@ async def setup_test_cases(
     fixtures: list[loader.Fixture] = []
     shared_data: dict[loader.Fixture, object] = {}
 
-    ui.info("Setting up global test prerequisites... ")
-    for _case, _attr, fixture in _collect_global_fixtures(cases):
-        if options is not None:
-            fixture.set_options(options)
-        await fixture.set_up(ui)
-        data = fixture.get_shared_data()
-        if data is not None:
-            shared_data[fixture] = data
-            fixtures.append(fixture)
+    with ui.stage("Setting up global test prerequisites... "):
+        for _case, _attr, fixture in _collect_global_fixtures(cases):
+            if options is not None:
+                fixture.set_options(options)
+            await fixture.set_up(ui)
+            data = fixture.get_shared_data()
+            if data is not None:
+                shared_data[fixture] = data
+                fixtures.append(fixture)
 
-    # Export the shared data under every (class, attribute) that
-    # references the fixture: workers import an arbitrary subset of the
-    # test modules and must be able to find the data through any one
-    # of them.
-    for case, attr, fixture in _iter_global_fixture_occurrences(cases):
-        data = shared_data.get(fixture)
-        if data is not None:
-            key = f"{case.__module__}.{case.__qualname__}:{attr}"
-            fixture_data[key] = data
+        # Export the shared data under every (class, attribute) that
+        # references the fixture: workers import an arbitrary subset
+        # of the test modules and must be able to find the data
+        # through any one of them.
+        for case, attr, fixture in _iter_global_fixture_occurrences(cases):
+            data = shared_data.get(fixture)
+            if data is not None:
+                key = f"{case.__module__}.{case.__qualname__}:{attr}"
+                fixture_data[key] = data
 
-    ui.info("\nSetting up test classes ")
-    stats = await _call_session_phase(
-        callback=_setup_test_case,
-        cases=cases,
-        num_jobs=num_jobs,
-        options=options,
-        ui=ui,
-    )
+    with ui.stage("\nSetting up test classes "):
+        stats = await _call_session_phase(
+            callback=_setup_test_case,
+            cases=cases,
+            num_jobs=num_jobs,
+            options=options,
+            ui=ui,
+        )
 
-    for fixture in fixtures:
-        await fixture.post_session_set_up(cases, ui=ui)
+        for fixture in fixtures:
+            await fixture.post_session_set_up(cases, ui=ui)
 
     class_data: dict[str, Mapping[str, object]] = {}
     for testcls in cases:
@@ -107,28 +107,28 @@ async def tear_down_test_cases(
 ) -> Stats:
     stats = []
 
-    ui.info("Tearing down test classes ")
-    try:
-        stats.extend(
-            await _call_session_phase(
-                callback=_tear_down_test_case,
-                cases=cases,
-                num_jobs=num_jobs,
-                options=options,
-                ui=ui,
+    with ui.stage("Tearing down test classes "):
+        try:
+            stats.extend(
+                await _call_session_phase(
+                    callback=_tear_down_test_case,
+                    cases=cases,
+                    num_jobs=num_jobs,
+                    options=options,
+                    ui=ui,
+                )
             )
-        )
-    except Exception:
-        err = traceback.format_exc()
-        ui.warning(f"exception in test class teardown:\n{err}\n")
+        except Exception:
+            err = traceback.format_exc()
+            ui.warning(f"exception in test class teardown:\n{err}\n")
 
-    ui.info("Tearing down global test prerequisites... ")
-    try:
-        for _, _, fixture in _collect_global_fixtures(cases):
-            await fixture.tear_down(ui)
-    except Exception:
-        err = traceback.format_exc()
-        ui.warning(f"exception in test fixture teardown:\n{err}\n")
+    with ui.stage("Tearing down global test prerequisites... "):
+        try:
+            for _, _, fixture in _collect_global_fixtures(cases):
+                await fixture.tear_down(ui)
+        except Exception:
+            err = traceback.format_exc()
+            ui.warning(f"exception in test fixture teardown:\n{err}\n")
 
     return stats
 

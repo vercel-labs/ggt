@@ -134,16 +134,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--warnings",
-        dest="warnings",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="enable warnings (enabled by default)",
+        help="enable warning capture and reporting (default: enabled)",
     )
     parser.add_argument(
-        "--no-warnings",
-        dest="warnings",
-        action="store_false",
-        help="disable warnings",
+        "--capture",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "capture test stdout/stderr; captured output of failing "
+            "tests is shown in their failure report (default: enabled; "
+            "use --no-capture to let test output pass through to the "
+            "terminal)"
+        ),
     )
     parser.add_argument(
         "-j",
@@ -314,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # This process is a test runner, not a ggt worker: discard any
+    # worker marker inherited from the environment (e.g. when ggt is
+    # itself invoked by a test running inside a ggt worker).
+    os.environ.pop("GGT_PARALLEL", None)
+
     parser = build_parser()
     args = parser.parse_args(argv)
     args.output_format = runner.OutputFormat(args.output_format)
@@ -342,6 +351,7 @@ def test(
     debug: bool,
     output_format: runner.OutputFormat,
     warnings: bool,
+    capture: bool,
     failfast: bool,
     shuffle: bool,
     cov: list[str],
@@ -490,6 +500,7 @@ def test(
             jobs=jobs,
             output_format=output_format,
             warnings=warnings,
+            capture=capture,
             failfast=failfast,
             shuffle=shuffle,
             distribute=distribute,
@@ -584,6 +595,7 @@ def _run(
     jobs: int,
     output_format: runner.OutputFormat,
     warnings: bool,
+    capture: bool,
     failfast: bool,
     shuffle: bool,
     distribute: str,
@@ -625,14 +637,20 @@ def _run(
                 styles.warning(f"Warning: {file}: no such file or directory.")
             )
 
-    suite = loader.discover(
-        files,
-        verbosity=verbosity,
-        include=include,
-        exclude=exclude,
-        progress_cb=update_progress,
-        mark_filter=mark_filter,
-    )
+    # Warnings emitted during collection (e.g. conftest compatibility
+    # notices) go to the end-of-run warning summary; in --list mode
+    # there is no summary, so let them print through.
+    with runner.recorded_warnings(
+        enabled=warnings and not list_tests
+    ) as collection_warnings:
+        suite = loader.discover(
+            files,
+            verbosity=verbosity,
+            include=include,
+            exclude=exclude,
+            progress_cb=update_progress,
+            mark_filter=mark_filter,
+        )
 
     if preload:
         # Record the post-discovery module set to warm up the next
@@ -665,6 +683,7 @@ def _run(
             verbosity=verbosity,
             output_format=runner.OutputFormat(output_format),
             warnings=warnings,
+            capture_output=capture,
             num_workers=jobs,
             failfast=failfast,
             shuffle=shuffle,
@@ -677,6 +696,7 @@ def _run(
             selected_shard,
             total_shards,
             running_times_log_file,
+            collection_warnings=collection_warnings,
         )
 
         if verbosity > 0:

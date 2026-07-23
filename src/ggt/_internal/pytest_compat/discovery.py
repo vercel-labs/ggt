@@ -28,6 +28,7 @@ import fnmatch
 import hashlib
 import importlib
 import importlib.util
+import os
 import pathlib
 import sys
 import unittest
@@ -202,6 +203,10 @@ def _collect_plugins(
 
 
 def _warn_ignored_hooks(mod: types.ModuleType, path: pathlib.Path) -> None:
+    if os.environ.get("GGT_PARALLEL") == "1":
+        # A worker re-importing the conftest: the runner process
+        # already reported this once during collection.
+        return
     hooks = sorted(
         name
         for name, value in vars(mod).items()
