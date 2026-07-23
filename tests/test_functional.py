@@ -104,6 +104,14 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--result-log", result.stdout)
         self.assertIn("-X", result.stdout)
 
+    async def test_version_prints_version_to_stdout(self) -> None:
+        import ggt
+
+        result = await self.run_ggt("--version")
+        await self.assert_success(result)
+        self.assertEqual(result.stdout.strip(), ggt.__version__)
+        self.assertEqual(result.stderr, "")
+
     async def test_validation_errors_are_friendly(self) -> None:
         cases = [
             (["-X", "missing-equals"], "Expected format key=value"),

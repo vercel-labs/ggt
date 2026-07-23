@@ -9,6 +9,8 @@ import argparse
 import contextlib
 import dataclasses
 import importlib.util
+
+import ggt
 import multiprocessing
 import os
 import pathlib
@@ -127,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--debug", action="store_true", help="output internal debug logs"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=ggt.__version__,
+        help="print the ggt version and exit",
     )
     parser.add_argument(
         "--output-format",
