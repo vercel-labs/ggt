@@ -880,6 +880,38 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_success(result)
         self.assertIn("still running", result.output)
 
+    async def test_start_method_falls_back_to_spawn_without_af_unix(
+        self,
+    ) -> None:
+        # Agent-harness sandboxes (e.g. Codex's Seatbelt profile) block
+        # binding the fork server's AF_UNIX listener socket while
+        # allowing fork/exec, pipes, and semaphores.  Simulate the
+        # blocked bind and check the start-method selection.
+        script = self.write(
+            self.project / "probe.py",
+            "import multiprocessing\n"
+            "import socket\n"
+            "from ggt._internal import mproc_fixes\n"
+            "\n"
+            "def deny_bind(self, address):\n"
+            "    raise PermissionError(1, 'Operation not permitted')\n"
+            "\n"
+            "socket.socket.bind = deny_bind\n"
+            "mproc_fixes.patch_multiprocessing(debug=False)\n"
+            "print(multiprocessing.get_start_method())\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout.decode().strip(), "spawn")
+
     async def test_parallel_failfast_stops_after_first_failure(self) -> None:
         self.use_fixture("failfast")
         result = await self.run_ggt(

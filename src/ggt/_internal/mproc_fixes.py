@@ -13,6 +13,7 @@ import multiprocessing.process
 import multiprocessing.reduction
 import multiprocessing.util
 import os
+import socket
 import sys
 import types
 
@@ -148,6 +149,32 @@ def _restore_Traceback() -> None:
     return None
 
 
+def forkserver_usable() -> bool:
+    """Whether the fork server's listener socket can be created.
+
+    The fork server listens on a filesystem-backed ``AF_UNIX`` socket.
+    Sandboxes used by agent harnesses and CI (e.g. the Seatbelt profile
+    of Codex) commonly deny binding such sockets while permitting
+    fork/exec, pipes, and POSIX semaphores — everything the "spawn"
+    start method needs.  Probe with a throwaway socket in the same
+    temporary directory the fork server would use (including its
+    too-long-for-``sun_path`` fallback logic), so parallel runs can
+    transparently fall back to "spawn" instead of dying with
+    ``PermissionError`` at pool startup.
+    """
+    try:
+        probe_path = os.path.join(
+            multiprocessing.util.get_temp_dir(), f"fs-probe-{os.getpid()}"
+        )
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(probe_path)
+        # Binding leaves a filesystem entry behind.
+        os.unlink(probe_path)
+    except OSError:
+        return False
+    return True
+
+
 def patch_multiprocessing(*, debug: bool) -> None:
     global _orig_pool_worker_handler, _orig_pool_join_exited_workers  # noqa: PLW0603
 
@@ -158,9 +185,13 @@ def patch_multiprocessing(*, debug: bool) -> None:
     # https://www.wefearchange.org/2018/11/forkmacos.rst.html
     # Prefer "forkserver" when available: it keeps the safer clean-server
     # fork model while avoiding most of the per-worker import overhead of
-    # "spawn". Fall back to "spawn" on platforms that do not support it.
+    # "spawn". Fall back to "spawn" on platforms that do not support it
+    # or in sandboxes that block the fork server's listener socket.
     methods = multiprocessing.get_all_start_methods()
-    method = "forkserver" if "forkserver" in methods else "spawn"
+    if "forkserver" in methods and forkserver_usable():
+        method = "forkserver"
+    else:
+        method = "spawn"
     multiprocessing.set_start_method(method)
 
     # Add the ability to do clean shutdown of the worker.
