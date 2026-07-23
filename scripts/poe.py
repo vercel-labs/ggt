@@ -43,12 +43,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "typecheck":
         return run_group(typecheck_commands(), verbose=verbose)
     if command == "test":
-        return run_group(test_commands(), verbose=verbose)
+        return run_group(test_commands(verbose=verbose), verbose=verbose)
     if command == "test-python-matrix":
-        return run_group(test_python_matrix_commands(), verbose=verbose)
+        return run_group(
+            test_python_matrix_commands(verbose=verbose), verbose=verbose
+        )
     if command == "qa":
         return run_group(
-            (*lint_commands(), *typecheck_commands(), *test_commands()),
+            (
+                *lint_commands(),
+                *typecheck_commands(),
+                *test_commands(verbose=verbose),
+            ),
             verbose=verbose,
         )
     if command == "pre-commit":
@@ -113,20 +119,44 @@ def typecheck_commands() -> tuple[Command, ...]:
     )
 
 
-def test_commands() -> tuple[Command, ...]:
+def fancy_output_expected() -> bool:
+    """Return whether lograil will render a live fancy display."""
+    mode = os.environ.get("LOGRAIL_OUTPUT", "").strip().lower()
+    if mode:
+        return mode == "fancy"
+    return sys.stderr.isatty()
+
+
+def ggt_output_format(*, verbose: bool) -> str:
     # ggt emits lograil-native NDJSON entries, so no output parser is
     # needed: the default remaps adopt them and drive the progress bar.
+    # Without a live display (and not in verbose mode), the NDJSON
+    # stream would render as one plain line per test; fall back to
+    # ggt's own compact simple output instead.
+    if verbose or fancy_output_expected():
+        return "json"
+    return "simple"
+
+
+def test_commands(*, verbose: bool = False) -> tuple[Command, ...]:
     return (
         Command(
             "ggt tests",
-            ("ggt", "tests", "--output-format", "json"),
+            (
+                "ggt",
+                "tests",
+                "--output-format",
+                ggt_output_format(verbose=verbose),
+            ),
             "test",
             quiet=False,
         ),
     )
 
 
-def test_python_matrix_commands() -> tuple[Command, ...]:
+def test_python_matrix_commands(
+    *, verbose: bool = False
+) -> tuple[Command, ...]:
     return tuple(
         Command(
             f"py{version}",
@@ -140,7 +170,7 @@ def test_python_matrix_commands() -> tuple[Command, ...]:
                 f"py{version.replace('.', '')}",
                 "--",
                 "--output-format",
-                "json",
+                ggt_output_format(verbose=verbose),
             ),
             "test matrix",
             quiet=False,
