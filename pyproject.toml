@@ -50,8 +50,12 @@ test = [
 # to avoid cqa breakage in CI.
 check = [
     "coverage>=7.4",
+    "lograil>=0.6.0",
     "mypy==1.17.1",
+    "poethepoet>=0.48.0",
     "ruff==0.12.10",
+    "tox>=4",
+    "tox-uv-bare",
     "ty==0.0.52",
     "uv==0.11.24",
     "zizmor==1.26.1",
@@ -87,6 +91,85 @@ bump = true
 
 [tool.uv]
 default-groups = ["dev"]
+# lograil is first-party; exempt it from the global exclude-newer
+# quarantine window so freshly-released versions resolve immediately.
+exclude-newer-package = { lograil = "2026-07-24T00:00:00Z" }
+
+# ========================
+#           TOX
+# ========================
+
+[tool.tox]
+requires = ["tox>=4", "tox-uv-bare"]
+env_list = ["py311", "py312", "py313", "py314"]
+
+[tool.tox.env_run_base]
+runner = "uv-venv-lock-runner"
+dependency_groups = ["test"]
+commands = [["ggt", "tests", { replace = "posargs", extend = true }]]
+
+# ========================
+#           POE
+# ========================
+
+[tool.poe]
+verbosity = -1
+
+[tool.poe.tasks.setup]
+sequence = ["sync-githooks"]
+
+[tool.poe.tasks.sync-githooks]
+cmd = "python scripts/sync-githooks.py"
+
+[tool.poe.tasks.fix]
+sequence = ["ruff-check-fix", "ruff-format-fix"]
+
+[tool.poe.tasks.lint]
+cmd = "python scripts/poe.py lint --poe-verbose ${verbose:-false}"
+args = [{ name = "verbose", options = ["-v", "--verbose"], type = "boolean" }]
+
+[tool.poe.tasks.typecheck]
+cmd = "python scripts/poe.py typecheck --poe-verbose ${verbose:-false}"
+args = [{ name = "verbose", options = ["-v", "--verbose"], type = "boolean" }]
+
+[tool.poe.tasks.test]
+cmd = "python scripts/poe.py test --poe-verbose ${verbose:-false}"
+args = [{ name = "verbose", options = ["-v", "--verbose"], type = "boolean" }]
+
+[tool.poe.tasks.test-python-matrix]
+cmd = "python scripts/poe.py test-python-matrix --poe-verbose ${verbose:-false}"
+args = [{ name = "verbose", options = ["-v", "--verbose"], type = "boolean" }]
+
+[tool.poe.tasks.qa]
+cmd = "python scripts/poe.py qa --poe-verbose ${verbose:-false}"
+args = [{ name = "verbose", options = ["-v", "--verbose"], type = "boolean" }]
+
+[tool.poe.tasks.pre-commit]
+cmd = "python scripts/poe.py pre-commit"
+
+[tool.poe.tasks.pre-push]
+cmd = "python scripts/poe.py pre-push"
+
+[tool.poe.tasks.ruff-check]
+cmd = "ruff check src/ggt pyproject.toml"
+
+[tool.poe.tasks.ruff-check-fix]
+cmd = "ruff check --fix src/ggt pyproject.toml"
+
+[tool.poe.tasks.ruff-format]
+cmd = "ruff format --check src tests"
+
+[tool.poe.tasks.ruff-format-fix]
+cmd = "ruff format src tests"
+
+[tool.poe.tasks.lint-zizmor]
+cmd = "zizmor --offline .github/workflows"
+
+[tool.poe.tasks.typecheck-mypy]
+cmd = "mypy"
+
+[tool.poe.tasks.typecheck-ty]
+cmd = "ty check"
 
 # ========================
 #          MYPY
