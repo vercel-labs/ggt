@@ -9,7 +9,8 @@ forked worker pays that price again because the forkserver process is
 deliberately clean.  This module removes that cost from the hot path:
 
 - after discovery, the parent saves the list of loaded modules to
-  ``.ggt_cache/preload.json``;
+  ``preload-<env fingerprint>.json`` in the cache directory (a
+  format-versioned subdirectory of ``.ggt_cache``);
 - on the *next* run, the fork server is started immediately at CLI
   startup, armed (via ``multiprocessing.set_forkserver_preload``) to
   import that cached list — concurrently with the parent's own test
@@ -29,11 +30,30 @@ simply imported later by whichever worker needs it.  ``--no-preload``
 disables the mechanism for suites whose dependencies are not
 fork-safe at import time (e.g. modules that start background threads
 when imported).
+
+The warm-up must never take the fork server down with it: the server
+only tolerates ``ImportError`` from preload imports, and a server
+that dies after workers began connecting surfaces as an opaque
+``EOFError`` at pool startup.  Three layers guard against that:
+
+- cache filenames carry a digest of an environment fingerprint
+  (interpreter, prefix, ``PYTHONPATH``, this module's origin), so a
+  cache written by a different environment is never even read — it
+  can neither crash the server nor warm it with modules resolved
+  from the wrong tree; the full fingerprint is also recorded in the
+  payload and verified at load time;
+- the origin-validation pass never evicts *this* module, whose import
+  is still executing — removing a mid-import module from
+  ``sys.modules`` violates an importlib invariant and raises
+  ``KeyError`` inside the import machinery;
+- ``_preload()`` is invoked under a catch-all, because a cold server
+  is always preferable to a dead one.
 """
 
 from __future__ import annotations
 
 import gc
+import hashlib
 import importlib
 import json
 import multiprocessing
@@ -44,7 +64,54 @@ import sys
 
 ENV_MODULES = "GGT_PRELOAD_MODULES"
 CACHE_DIR = ".ggt_cache"
-CACHE_FILE = "preload.json"
+
+# Format version of the cache contents.  All cache files live in a
+# subdirectory named after it, so bumping it when a recorded structure
+# changes incompatibly makes every older cache invisible (rather than
+# merely rejected).  Deliberately independent of the ggt version:
+# upgrading ggt in place keeps module paths (and therefore the
+# environment fingerprint) stable, so only an explicit version bump
+# reliably invalidates old caches.
+CACHE_VERSION = 1
+_CACHE_SUBDIR = f"v{CACHE_VERSION}"
+
+_CACHEDIR_TAG_FILE = "CACHEDIR.TAG"
+# https://bford.info/cachedir/ — the signature line must be the first
+# 43 bytes of the file for backup and sync tools to recognize it.
+_CACHEDIR_TAG_CONTENT = (
+    "Signature: 8a477f597d28d172789f06886806bc55\n"
+    "# This file is a cache directory tag created by ggt.\n"
+    "# For information about cache directory tags see:\n"
+    "#   https://bford.info/cachedir/\n"
+)
+
+
+def _env_fingerprint() -> dict[str, str]:
+    """Identify the environment a preload cache was recorded in.
+
+    A cache recorded by a different interpreter, virtualenv, or module
+    search path must not be replayed: the recorded ``sys.path`` would
+    make the fork server import modules from trees the current run did
+    not select, and a mismatched origin for this very module would
+    poison the server's warm-up import (see module docstring).
+    """
+    return {
+        "executable": sys.executable,
+        "prefix": sys.prefix,
+        "pythonpath": os.environ.get("PYTHONPATH", ""),
+        "preload_origin": __file__,
+    }
+
+
+def env_fingerprint() -> str:
+    """Stable filename-safe digest of the environment fingerprint.
+
+    Cache filenames carry this digest, so caches written by different
+    environments never read — or clobber — each other; a mismatched
+    environment simply resolves to a file that does not exist.
+    """
+    payload = json.dumps(_env_fingerprint(), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 def compute_preload_state() -> dict[str, object]:
@@ -70,21 +137,40 @@ def compute_preload_state() -> dict[str, object]:
             continue
         modules.append([name, origin])
     modules.sort()
-    return {"sys_path": list(sys.path), "modules": modules}
+    return {
+        "env": _env_fingerprint(),
+        "sys_path": list(sys.path),
+        "modules": modules,
+    }
 
 
 def _cache_path() -> pathlib.Path:
-    return pathlib.Path(CACHE_DIR) / CACHE_FILE
+    return (
+        pathlib.Path(CACHE_DIR)
+        / _CACHE_SUBDIR
+        / f"preload-{env_fingerprint()}.json"
+    )
 
 
 def ensure_cache_dir() -> pathlib.Path | None:
-    """Create (if needed) and return the ggt cache directory."""
+    """Create (if needed) and return the ggt cache directory.
+
+    The returned directory is the format-versioned subdirectory all
+    cache files are written to; the root holds only the markers that
+    apply to every version (``.gitignore`` and the ``CACHEDIR.TAG``
+    backup-exclusion tag).
+    """
     try:
-        cache_dir = pathlib.Path(CACHE_DIR)
-        cache_dir.mkdir(exist_ok=True)
-        gitignore = cache_dir / ".gitignore"
+        root = pathlib.Path(CACHE_DIR)
+        root.mkdir(exist_ok=True)
+        gitignore = root / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text("*\n", encoding="utf-8")
+        cachedir_tag = root / _CACHEDIR_TAG_FILE
+        if not cachedir_tag.exists():
+            cachedir_tag.write_text(_CACHEDIR_TAG_CONTENT, encoding="utf-8")
+        cache_dir = root / _CACHE_SUBDIR
+        cache_dir.mkdir(exist_ok=True)
     except OSError:
         return None
     return cache_dir
@@ -94,12 +180,18 @@ def save_module_cache() -> None:
     """Record the post-discovery module set for the next run."""
     if ensure_cache_dir() is None:
         return
+    path = _cache_path()
+    # Write-and-rename so a concurrent ggt run in the same directory
+    # (same environment, hence same filename) never reads torn JSON.
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
     try:
-        _cache_path().write_text(
-            json.dumps(compute_preload_state()), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(compute_preload_state()), encoding="utf-8")
+        tmp.replace(path)
     except OSError:
-        pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def load_module_cache() -> dict[str, object] | None:
@@ -108,6 +200,11 @@ def load_module_cache() -> dict[str, object] | None:
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or not data.get("modules"):
+        return None
+    if data.get("env") != _env_fingerprint():
+        # Recorded by a different environment; replaying it would warm
+        # the fork server with modules from the wrong tree.  Treat as
+        # absent — this run rewrites the cache after discovery.
         return None
     return data
 
@@ -191,10 +288,29 @@ def _preload() -> None:
     # the import loop because importing a submodule re-imports its
     # parent packages as a side effect, potentially re-poisoning an
     # entry that was checked earlier.
+    own_package = __name__.partition(".")[0]
     for entry in modules:
         try:
             name, origin = entry
         except ValueError:
+            continue
+        if name == own_package or name.startswith(f"{own_package}."):
+            # ggt's own tree is exempt from eviction, for two reasons.
+            # This very module's import is executing right now:
+            # importlib pops and re-inserts sys.modules[name] once
+            # exec_module returns, and binds the child attribute via
+            # an unguarded sys.modules[parent] lookup (Python <=
+            # 3.13), so evicting it or its parent packages raises
+            # KeyError inside the import machinery and kills the fork
+            # server.  And evicting any *other* ggt module splits
+            # ggt into two generations of module objects — the
+            # server's machinery keeps references to the old one
+            # while workers re-import a new one, breaking pickling's
+            # identity checks.  Neither is ever necessary: ggt
+            # modules resolve through the already-imported package
+            # objects of the current tree, so the in-memory copy is
+            # the correct one regardless of what a stale cache
+            # recorded.
             continue
         mod = sys.modules.get(str(name))
         if mod is not None and getattr(mod, "__file__", None) != origin:
@@ -206,4 +322,12 @@ def _preload() -> None:
     gc.freeze()
 
 
-_preload()
+try:
+    _preload()
+except Exception:  # noqa: S110
+    # Warm-up is strictly best-effort.  An exception escaping this
+    # module kills the fork server (forkserver.main only tolerates
+    # ImportError from preload imports), and a server that dies while
+    # workers are connecting fails the whole run with an opaque
+    # EOFError at pool startup.  A cold server beats a dead one.
+    pass

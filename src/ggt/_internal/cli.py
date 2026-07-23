@@ -100,6 +100,11 @@ def _open_running_times_log(path: str | None) -> TextIO | None:
         if cache_dir is None:
             return None
         try:
+            # Deliberately not suffixed with the environment
+            # fingerprint: timing data is environment-neutral and is
+            # meant to be shared across environments (and persisted CI
+            # runs); concurrent access is arbitrated by the advisory
+            # lock in the runner.
             return open(
                 cache_dir / "running_times.csv",
                 "a+",
@@ -276,8 +281,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILEPATH",
         help=(
             "maintain a running time log file at FILEPATH "
-            "(default: .ggt_cache/running_times.csv; the timings feed "
-            "shard balancing and parallel task scheduling)"
+            "(default: running_times.csv in the ggt cache directory; "
+            "the timings feed shard balancing and parallel task "
+            "scheduling)"
         ),
     )
     parser.add_argument(

@@ -101,6 +101,45 @@ def recorded_warnings(
         yield ww
 
 
+def _lock_file(file: TextIO, *, exclusive: bool) -> bool:
+    """Take a non-blocking advisory lock on ``file``; True on success.
+
+    Concurrent ggt runs in the same directory share the running-times
+    log: readers take a shared lock, the end-of-run rewrite takes an
+    exclusive one and is simply skipped when a competing run holds the
+    file.  Acquisition is retried briefly (a writer holds the lock only
+    for one in-memory rewrite) but never blocks indefinitely — timing
+    data is a performance optimization, not worth wedging a run over.
+
+    On platforms without ``flock`` (Windows) locking degrades to a
+    no-op "success".
+    """
+    try:
+        import fcntl  # noqa: PLC0415
+    except ImportError:  # pragma: no cover
+        return True
+    op = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+    for _ in range(5):
+        try:
+            fcntl.flock(file.fileno(), op)
+        except OSError:
+            time.sleep(0.02)
+        else:
+            return True
+    return False
+
+
+def _unlock_file(file: TextIO) -> None:
+    try:
+        import fcntl  # noqa: PLC0415
+    except ImportError:  # pragma: no cover
+        return
+    try:
+        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
 class _SessionPhaseHolder:
     """Stands in for a test when attributing session-phase warnings."""
 
@@ -1578,12 +1617,22 @@ class ParallelTextTestRunner:
         session_start = time.monotonic()
         cases = loader.get_test_cases([test])
         stats = {}
-        if running_times_log_file:
-            running_times_log_file.seek(0)
-            stats = {
-                k: (float(v), int(c))
-                for k, v, c in csv.reader(running_times_log_file)
-            }
+        if running_times_log_file and _lock_file(
+            running_times_log_file, exclusive=False
+        ):
+            try:
+                running_times_log_file.seek(0)
+                for row in csv.reader(running_times_log_file):
+                    try:
+                        rec_name, rec_avg, rec_count = row
+                        stats[rec_name] = (float(rec_avg), int(rec_count))
+                    except ValueError:
+                        # A malformed row (e.g. left over from a
+                        # pre-locking torn rewrite) costs one timing
+                        # entry, not the run.
+                        continue
+            finally:
+                _unlock_file(running_times_log_file)
         cases = loader.get_cases_by_shard(
             cases,
             selected_shard,
@@ -1720,19 +1769,28 @@ class ParallelTextTestRunner:
             for wmsg in teardown_warnings:
                 result.addWarning(teardown_holder, wmsg)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
 
-            if running_times_log_file:
-                for test_obj, stat in (
-                    result.test_stats + setup_stats + teardown_stats
-                ):
-                    name = str(test_obj)
-                    t = stat.get("running-time", 0)
-                    at, c = stats.get(name, (0, 0))
-                    stats[name] = (at + (t - at) / (c + 1), c + 1)
-                running_times_log_file.seek(0)
-                running_times_log_file.truncate()
-                writer = csv.writer(running_times_log_file)
-                for k, v in stats.items():
-                    writer.writerow((k, *v))
+            if running_times_log_file and _lock_file(
+                running_times_log_file, exclusive=True
+            ):
+                # When a competing run holds the lock, the rewrite is
+                # skipped: that run's timings win and this run's are
+                # dropped, which is cheaper than corrupting the file
+                # and only dampens the running averages.
+                try:
+                    for test_obj, stat in (
+                        result.test_stats + setup_stats + teardown_stats
+                    ):
+                        name = str(test_obj)
+                        t = stat.get("running-time", 0)
+                        at, c = stats.get(name, (0, 0))
+                        stats[name] = (at + (t - at) / (c + 1), c + 1)
+                    running_times_log_file.seek(0)
+                    running_times_log_file.truncate()
+                    writer = csv.writer(running_times_log_file)
+                    for k, v in stats.items():
+                        writer.writerow((k, *v))
+                finally:
+                    _unlock_file(running_times_log_file)
 
             tests_time_taken = time.monotonic() - start
 
