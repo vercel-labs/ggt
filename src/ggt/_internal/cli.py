@@ -449,7 +449,9 @@ def test(
 
     mproc_fixes.patch_multiprocessing(debug=debug)
 
-    if preload and "forkserver" in multiprocessing.get_all_start_methods():
+    # patch_multiprocessing selects "forkserver" only where the fork
+    # server can actually run (sandboxes may block its listener socket).
+    if preload and multiprocessing.get_start_method() == "forkserver":
         # Start the fork server immediately: it warms up on the module
         # list cached by the previous run while this process performs
         # test discovery.
