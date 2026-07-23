@@ -35,6 +35,7 @@ class RunResult:
 class FunctionalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._td = tempfile.TemporaryDirectory()
+        self._run_seq = 0
         self.project = pathlib.Path(self._td.name)
         self.tests_dir = self.project / "tests"
         self.tests_dir.mkdir()
@@ -70,8 +71,21 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         cwd: pathlib.Path | None = None,
         env: dict[str, str] | None = None,
     ) -> RunResult:
+        # Inner runs execute in fresh temporary projects, so the
+        # preload fork server never has a warm module cache and only
+        # adds startup cost; a per-invocation running-times log keeps
+        # concurrent runs from racing on the shared cache file.  Tests
+        # can override either default with their own flags (the last
+        # occurrence wins).
+        self._run_seq += 1
+        default_args = (
+            "--no-preload",
+            "--running-times-log",
+            str(self.project / f".run-times-{self._run_seq}.csv"),
+        )
         proc = await asyncio.create_subprocess_exec(
             "ggt",
+            *default_args,
             *args,
             cwd=cwd or self.project,
             env=env or self.env(),
@@ -122,9 +136,11 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             (["--cov", "pkg/path", "tests"], "looks like a path"),
         ]
 
-        for args, expected in cases:
+        results = await asyncio.gather(
+            *(self.run_ggt(*args) for args, _ in cases)
+        )
+        for (args, expected), result in zip(cases, results):
             with self.subTest(args=args):
-                result = await self.run_ggt(*args)
                 await self.assert_failure(result)
                 self.assertIn(expected, result.output)
 
@@ -157,31 +173,33 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.use_fixture("basic")
         self.use_fixture("pkg")
 
-        listed = await self.run_ggt("tests", "--list")
+        listed, by_file, by_package = await asyncio.gather(
+            self.run_ggt("tests", "--list"),
+            self.run_ggt(
+                "tests/test_basic.py",
+                "-k",
+                "select_me",
+                "-e",
+                "exclude_me",
+                "-j1",
+                "--output-format",
+                "simple",
+            ),
+            self.run_ggt(
+                "tests/pkg",
+                "-j1",
+                "--output-format",
+                "simple",
+            ),
+        )
         await self.assert_success(listed)
         self.assertIn("test_pass_a", listed.stdout)
         self.assertIn("test_from_package", listed.stdout)
         self.assertIn("test_skipped", listed.stdout)
 
-        by_file = await self.run_ggt(
-            "tests/test_basic.py",
-            "-k",
-            "select_me",
-            "-e",
-            "exclude_me",
-            "-j1",
-            "--output-format",
-            "simple",
-        )
         await self.assert_success(by_file)
         self.assertIn("tests ran: 1", by_file.output)
 
-        by_package = await self.run_ggt(
-            "tests/pkg",
-            "-j1",
-            "--output-format",
-            "simple",
-        )
         await self.assert_success(by_package)
         self.assertIn("tests ran: 1", by_package.output)
 
@@ -216,9 +234,9 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             ("integ.*", 2),
             ("not (slow or integration)", 2),
         ]
-        for expr, expected in cases:
-            with self.subTest(expr=expr):
-                result = await self.run_ggt(
+        *results, invalid, bad_regexp = await asyncio.gather(
+            *(
+                self.run_ggt(
                     "tests",
                     "-m",
                     expr,
@@ -226,14 +244,19 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                     "--output-format",
                     "simple",
                 )
+                for expr, _ in cases
+            ),
+            self.run_ggt("tests", "-m", "slow oops"),
+            self.run_ggt("tests", "-m", "slow or ["),
+        )
+        for (expr, expected), result in zip(cases, results):
+            with self.subTest(expr=expr):
                 await self.assert_success(result)
                 self.assertIn(f"tests ran: {expected}", result.output)
 
-        invalid = await self.run_ggt("tests", "-m", "slow oops")
         await self.assert_failure(invalid)
         self.assertIn("invalid mark expression", invalid.output)
 
-        bad_regexp = await self.run_ggt("tests", "-m", "slow or [")
         await self.assert_failure(bad_regexp)
         self.assertIn("bad mark pattern", bad_regexp.output)
 
@@ -244,9 +267,9 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             ("fixtures/pkg/tests", "tests ran: 1"),
         ]
 
-        for path, expected in cases:
-            with self.subTest(path=path):
-                result = await self.run_ggt(
+        results = await asyncio.gather(
+            *(
+                self.run_ggt(
                     path,
                     "-j1",
                     "--output-format",
@@ -254,6 +277,11 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                     cwd=REPO_ROOT,
                     env=self.env(),
                 )
+                for path, _ in cases
+            )
+        )
+        for (path, expected), result in zip(cases, results):
+            with self.subTest(path=path):
                 await self.assert_success(result)
                 self.assertIn(expected, result.output)
 
@@ -359,40 +387,45 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         times = self.project / "times.csv"
         self.use_fixture("modes")
 
-        for jobs in ["1", "2"]:
-            with self.subTest(jobs=jobs):
-                result = await self.run_ggt(
+        *job_results, repeated, shard = await asyncio.gather(
+            *(
+                self.run_ggt(
                     "tests/test_modes.py",
                     "-j",
                     jobs,
                     "--output-format",
                     "simple",
                 )
+                for jobs in ["1", "2"]
+            ),
+            self.run_ggt(
+                "tests/test_modes.py",
+                "-j1",
+                "--repeat",
+                "2",
+                "--output-format",
+                "simple",
+            ),
+            self.run_ggt(
+                "tests/test_modes.py",
+                "-j1",
+                "--shard",
+                "1/2",
+                "--running-times-log",
+                str(times),
+                "--output-format",
+                "simple",
+            ),
+        )
+        for jobs, result in zip(["1", "2"], job_results):
+            with self.subTest(jobs=jobs):
                 self.skip_if_multiprocessing_blocked(result)
                 await self.assert_success(result)
                 self.assertIn("tests ran: 4", result.output)
 
-        repeated = await self.run_ggt(
-            "tests/test_modes.py",
-            "-j1",
-            "--repeat",
-            "2",
-            "--output-format",
-            "simple",
-        )
         await self.assert_success(repeated)
         self.assertIn("Repeat #2 out of 2", repeated.output)
 
-        shard = await self.run_ggt(
-            "tests/test_modes.py",
-            "-j1",
-            "--shard",
-            "1/2",
-            "--running-times-log",
-            str(times),
-            "--output-format",
-            "simple",
-        )
         await self.assert_success(shard)
         self.assertTrue(times.exists())
         rows = list(csv.reader(times.read_text(encoding="utf-8").splitlines()))
@@ -537,14 +570,20 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_output_formats_smoke(self) -> None:
         self.use_fixture("basic")
-        for fmt in ["simple", "verbose", "stacked", "silent", "json"]:
-            with self.subTest(fmt=fmt):
-                result = await self.run_ggt(
+        formats = ["simple", "verbose", "stacked", "silent", "json"]
+        results = await asyncio.gather(
+            *(
+                self.run_ggt(
                     "tests/test_basic.py",
                     "-j1",
                     "--output-format",
                     fmt,
                 )
+                for fmt in formats
+            )
+        )
+        for fmt, result in zip(formats, results):
+            with self.subTest(fmt=fmt):
                 await self.assert_success(result)
                 self.assertIn("SUCCESS", result.output)
                 if fmt == "verbose":
@@ -563,14 +602,20 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_output_emits_valid_ndjson(self) -> None:
         self.use_fixture("outcomes")
-        for jobs in ("-j1", "-j2"):
-            with self.subTest(jobs=jobs):
-                result = await self.run_ggt(
+        job_variants = ("-j1", "-j2")
+        job_results = await asyncio.gather(
+            *(
+                self.run_ggt(
                     "tests/test_outcomes.py",
                     jobs,
                     "--output-format",
                     "json",
                 )
+                for jobs in job_variants
+            )
+        )
+        for jobs, result in zip(job_variants, job_results):
+            with self.subTest(jobs=jobs):
                 self.skip_if_multiprocessing_blocked(result)
                 await self.assert_failure(result)
                 entries = self.parse_ndjson(result)
@@ -676,9 +721,10 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_output_sharding(self) -> None:
         self.use_fixture("sharding")
-        for shard in ("1/2", "2/2"):
-            with self.subTest(shard=shard):
-                result = await self.run_ggt(
+        shards = ("1/2", "2/2")
+        shard_results = await asyncio.gather(
+            *(
+                self.run_ggt(
                     "tests/test_sharding.py",
                     "-j1",
                     "-s",
@@ -686,6 +732,11 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                     "--output-format",
                     "json",
                 )
+                for shard in shards
+            )
+        )
+        for shard, result in zip(shards, shard_results):
+            with self.subTest(shard=shard):
                 await self.assert_success(result)
                 entries = self.parse_ndjson(result)
                 run_started = next(
@@ -1273,9 +1324,9 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             ("slow and not integration", 1),
             ("not slow", 10),
         ]
-        for expr, expected in cases:
-            with self.subTest(expr=expr):
-                result = await self.run_ggt(
+        *results, invalid = await asyncio.gather(
+            *(
+                self.run_ggt(
                     "extras",
                     "-m",
                     expr,
@@ -1285,10 +1336,15 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                     "--output-format",
                     "simple",
                 )
+                for expr, _ in cases
+            ),
+            self.run_ggt("extras", "-m", "slow =="),
+        )
+        for (expr, expected), result in zip(cases, results):
+            with self.subTest(expr=expr):
                 await self.assert_success(result)
                 self.assertIn(f"tests ran: {expected}", result.output)
 
-        invalid = await self.run_ggt("extras", "-m", "slow ==")
         await self.assert_failure(invalid)
         self.assertIn("invalid mark expression", invalid.output)
 
@@ -1385,7 +1441,16 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
     async def test_pytest_compat_anyio_backends(self) -> None:
         self.use_fixture("pytestcompat")
 
-        listed = await self.run_ggt("anyiotests", "--list")
+        listed, result = await asyncio.gather(
+            self.run_ggt("anyiotests", "--list"),
+            self.run_ggt(
+                "anyiotests",
+                "anyiodefault",
+                "-j1",
+                "--output-format",
+                "simple",
+            ),
+        )
         await self.assert_success(listed)
         self.assertIn("test_backend_matches[asyncio]", listed.stdout)
         self.assertIn("test_backend_matches[trio]", listed.stdout)
@@ -1393,13 +1458,6 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("test_sync_not_duplicated (", listed.stdout)
         self.assertNotIn("test_sync_not_duplicated[", listed.stdout)
 
-        result = await self.run_ggt(
-            "anyiotests",
-            "anyiodefault",
-            "-j1",
-            "--output-format",
-            "simple",
-        )
         await self.assert_success(result)
         # anyiotests: 3 async tests x 2 backends + 1 sync + 1
         # hypothesis-wrapped async test x 2 backends;
@@ -1539,6 +1597,9 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             result = await self.run_ggt(
                 "shared",
                 "-j2",
+                # Override the harness's --no-preload default: this
+                # test is specifically about the preload cache.
+                "--preload",
                 "--output-format",
                 "simple",
                 env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),

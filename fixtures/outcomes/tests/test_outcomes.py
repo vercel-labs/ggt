@@ -48,7 +48,7 @@ class Outcomes(unittest.IsolatedAsyncioTestCase):
     def test_not_implemented(self):
         self.fail("todo")
 
-    @async_timeout(1)
+    @async_timeout(0.1)
     async def test_async_timeout(self):
         await asyncio.sleep(2)
 
