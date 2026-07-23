@@ -640,6 +640,65 @@ Example GitHub Actions configuration:
              name: test-results
              path: results-*.json
 
+GitHub Action
+~~~~~~~~~~~~~
+
+This repository also ships a ``Setup ggt`` composite action that installs
+ggt and persists the ``.ggt_cache`` timing data across workflow runs, so
+shard balancing and parallel scheduling stay warm from run to run:
+
+.. code-block:: yaml
+
+   steps:
+     - uses: actions/checkout@v5
+     - uses: actions/setup-python@v5
+       with:
+         python-version: '3.12'
+     - uses: vercel-labs/ggt@v1.1.1  # pin an exact release tag or SHA
+       with:
+         version: '1.1.1'                          # optional, default: latest
+         extras: 'coverage'                        # optional
+         cache-suffix: shard-${{ matrix.shard }}   # per-shard timing data
+     - run: ggt -s ${{ matrix.shard }}/4
+
+Inputs:
+
+``install``
+   Whether to install ggt (default ``true``). Set to ``false`` to skip
+   installation and only persist the ``.ggt_cache`` timing cache, e.g.
+   when ggt is already installed as part of the project dependencies.
+``version``
+   Exact ggt version to install. Empty (the default) installs the
+   latest release from PyPI. Version ranges are not supported.
+``extras``
+   Comma-separated extras to install, e.g. ``coverage,pytest``.
+``enable-cache``
+   Whether to persist ``.ggt_cache`` across runs (default ``true``).
+``cache-dependency-glob``
+   Newline-separated glob(s) hashed into the cache key so caches roll
+   over when dependencies change (default ``**/pyproject.toml``).
+``cache-suffix``
+   Extra cache key discriminator, useful to keep matrix legs or shards
+   from sharing one cache slot.
+``working-directory``
+   Directory where ggt will be invoked, i.e. where ``.ggt_cache`` lives
+   (default ``.``).
+
+Outputs: ``ggt-version`` (the installed version; empty when
+``install: false``) and ``cache-hit`` (whether timing data was
+restored).
+
+Notes:
+
+* The action installs ggt into the **active** Python environment (set up
+  by ``actions/setup-python`` or equivalent, Python 3.11+). ggt is a test
+  runner, so it must share an interpreter with your project's code and
+  dependencies — there is deliberately no isolated virtualenv.
+* ``.ggt_cache`` holds preload and timing data only; it is purely a
+  performance optimization, and stale entries are harmless.
+* Pin the action to an exact release tag or commit SHA. Do not expect a
+  moving ``v1`` tag: ``v*`` tags in this repository drive PyPI releases.
+
 Coverage Integration
 --------------------
 

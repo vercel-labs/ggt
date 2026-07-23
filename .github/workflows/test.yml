@@ -26,7 +26,7 @@ jobs:
       - run: uv run --frozen --no-default-groups --group=check ruff check src/ggt pyproject.toml
       - run: uv run --frozen --no-default-groups --group=check mypy
       - run: uv run --frozen --no-default-groups --group=check ty check
-      - run: uv run --frozen --no-default-groups --group=check zizmor .github/workflows
+      - run: uv run --frozen --no-default-groups --group=check zizmor .github/workflows action.yml
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -50,20 +50,93 @@ jobs:
       - run: uv sync --frozen --no-default-groups --group=test
       - run: uv run --frozen --no-default-groups --group=test python -m unittest discover -s tests
 
+  action:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions: {}  # None needed
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache-only setup (no install)
+        id: cache-only
+        uses: ./
+        with:
+          install: false
+
+      - name: Assert ggt was not installed
+        env:
+          GGT_VERSION: ${{ steps.cache-only.outputs.ggt-version }}
+        shell: bash
+        run: |
+          test -z "$GGT_VERSION"
+          ! command -v ggt
+
+      # Give the cache-only invocation's post step something to save, so
+      # re-runs of this workflow exercise the timing cache restore path.
+      - name: Seed timing data
+        shell: bash
+        run: |
+          mkdir -p .ggt_cache
+          touch .ggt_cache/running_times.csv
+
+      - name: Set up latest ggt
+        id: latest
+        uses: ./
+        with:
+          enable-cache: false  # the cache-only invocation owns the cache
+
+      - name: Assert latest install
+        env:
+          GGT_VERSION: ${{ steps.latest.outputs.ggt-version }}
+        shell: bash
+        run: |
+          test -n "$GGT_VERSION"
+          ggt --version
+          python -c "import importlib.metadata as m, os; assert m.version('ggt') == os.environ['GGT_VERSION']"
+
+      - name: Set up pinned ggt with extras
+        id: pinned
+        uses: ./
+        with:
+          version: "1.1.0"
+          extras: "pytest"
+          enable-cache: false
+
+      - name: Assert pinned install
+        env:
+          GGT_VERSION: ${{ steps.pinned.outputs.ggt-version }}
+        shell: bash
+        run: |
+          test "$GGT_VERSION" = "1.1.0"
+          python -c "import pytest"
+          ggt --version
+
   summary:
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    needs: [checks, tests]
+    needs: [checks, tests, action]
     permissions: {}  # None needed
     steps:
       - name: Check required jobs
         env:
           CHECKS_RESULT: ${{ needs.checks.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
+          ACTION_RESULT: ${{ needs.action.result }}
         run: |
           echo "checks: ${CHECKS_RESULT}"
           echo "tests: ${TESTS_RESULT}"
+          echo "action: ${ACTION_RESULT}"
 
-          if [ "${CHECKS_RESULT}" != "success" ] || [ "${TESTS_RESULT}" != "success" ]; then
+          if [ "${CHECKS_RESULT}" != "success" ] \
+              || [ "${TESTS_RESULT}" != "success" ] \
+              || [ "${ACTION_RESULT}" != "success" ]; then
             exit 1
           fi

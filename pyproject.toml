@@ -163,7 +163,7 @@ cmd = "ruff format --check src tests"
 cmd = "ruff format src tests"
 
 [tool.poe.tasks.lint-zizmor]
-cmd = "zizmor --offline .github/workflows"
+cmd = "zizmor --offline .github/workflows action.yml"
 
 [tool.poe.tasks.typecheck-mypy]
 cmd = "mypy"
