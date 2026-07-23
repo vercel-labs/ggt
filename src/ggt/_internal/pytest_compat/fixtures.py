@@ -80,6 +80,32 @@ def fixture_params(
         return _fixture_params.__wrapped__(func, skip_first=skip_first)
 
 
+def _num_mock_patch_args(func: Callable[..., object]) -> int:
+    """Arguments consumed by ``unittest.mock.patch`` decorators.
+
+    Mirrors pytest's ``num_mock_patch_args``: each ``@patch`` (or
+    ``@patch.object``) without an explicit replacement passes a mock
+    to the test as a positional argument.  Those bind to the test's
+    leading parameters (fixtures are passed by keyword and so must
+    come after them in the signature); they are not fixture requests.
+    """
+    patchings = getattr(func, "patchings", None)
+    if not patchings:
+        return 0
+    mock_sentinel = getattr(sys.modules.get("mock"), "DEFAULT", object())
+    ut_mock_sentinel = getattr(
+        sys.modules.get("unittest.mock"), "DEFAULT", object()
+    )
+    return len(
+        [
+            p
+            for p in patchings
+            if not p.attribute_name
+            and (p.new is mock_sentinel or p.new is ut_mock_sentinel)
+        ]
+    )
+
+
 @functools.cache
 def _fixture_params(
     func: Callable[..., object],
@@ -93,6 +119,10 @@ def _fixture_params(
     params = [p for p in sig.parameters.values() if p.kind in _NAMED_KINDS]
     if skip_first and params:
         params = params[1:]
+    if num_mock := _num_mock_patch_args(func):
+        # inspect.signature followed __wrapped__ to the original
+        # function, whose leading parameters receive the mocks.
+        params = params[num_mock:]
     return tuple(
         p.name for p in params if p.default is inspect.Parameter.empty
     )
