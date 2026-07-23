@@ -126,6 +126,8 @@ class MonkeyPatch:
         try:
             obj = importlib.import_module(modpath)
         except ImportError:
+            if "." not in modpath:
+                raise
             # The prefix may itself be a "module.Class" path.
             parent, klass = modpath.rsplit(".", 1)
             obj = getattr(importlib.import_module(parent), klass)
@@ -266,13 +268,30 @@ class CaptureResult(NamedTuple):
     err: str
 
 
+class _CaptureIO(io.TextIOWrapper):
+    """Capture buffer with a real ``encoding``, like pytest's CaptureIO.
+
+    A plain ``StringIO`` reports ``encoding`` as ``None``, breaking
+    tests that consult ``sys.stdout.encoding`` while captured.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            io.BytesIO(), encoding="utf-8", newline="", write_through=True
+        )
+
+    def getvalue(self) -> str:
+        assert isinstance(self.buffer, io.BytesIO)
+        return self.buffer.getvalue().decode("utf-8")
+
+
 class CaptureFixture:
     """A minimal stand-in for pytest's capsys."""
 
     def __init__(self) -> None:
         self._old: tuple[Any, Any] | None = None
-        self._out = io.StringIO()
-        self._err = io.StringIO()
+        self._out = _CaptureIO()
+        self._err = _CaptureIO()
 
     def _start(self) -> None:
         self._old = (sys.stdout, sys.stderr)

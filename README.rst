@@ -304,8 +304,12 @@ Not supported (yet)
 -------------------
 
 The pytest plugin/hook system and third-party plugins (pytest-asyncio,
-pytest-mock, ...) — hooks defined in conftest.py files are ignored
-with a warning; ``pytest_generate_tests``; indirect parametrization;
+pytest-mock, ...) — hooks defined in conftest.py files or plugin
+modules are ignored with a warning.  Fixture-only plugin modules
+declared via a conftest's ``pytest_plugins`` *are* supported
+(transitively): they contribute their fixtures at lower lookup
+priority than any conftest.  ``pytest_generate_tests``; indirect
+parametrization;
 dynamically requested parametrized fixtures
 (``request.getfixturevalue()`` of a parametrized fixture); package-
 and dynamically-scoped fixtures; async fixtures with
@@ -643,7 +647,7 @@ Requirements
 Optional dependencies:
 
 - coverage >= 7.4 (``ggt[coverage]``)
-- pytest >= 8, < 9 (``ggt[pytest]``, enables pytest compatibility mode)
+- pytest >= 7.3.2, < 10 (``ggt[pytest]``, enables pytest compatibility mode)
 
 Git Hooks
 =========

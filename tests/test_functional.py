@@ -715,7 +715,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             env=self.env(GGT_FUNCTIONAL_EVENTS=str(events)),
         )
         await self.assert_success(result)
-        self.assertIn("tests ran: 17", result.output)
+        self.assertIn("tests ran: 19", result.output)
         self.assertIn(
             "conftest-imported",
             events.read_text(encoding="utf-8"),
@@ -731,7 +731,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.skip_if_multiprocessing_blocked(result)
         await self.assert_success(result)
-        self.assertIn("tests ran: 17", result.output)
+        self.assertIn("tests ran: 19", result.output)
 
     async def test_pytest_compat_filtering(self) -> None:
         self.use_fixture("pytestcompat")
@@ -966,6 +966,25 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.assert_success(result)
         self.assertIn("tests ran: 1", result.output)
+
+    async def test_pytest_compat_plugin_fixtures(self) -> None:
+        # Fixture-only plugin modules declared via a conftest's
+        # pytest_plugins (transitively) contribute fixtures; conftest
+        # fixtures override plugin fixtures of the same name.
+        self.use_fixture("pytestcompat")
+
+        for jobs in ("-j1", "-j2"):
+            with self.subTest(jobs=jobs):
+                result = await self.run_ggt(
+                    "plugins",
+                    jobs,
+                    "--output-format",
+                    "simple",
+                )
+                if jobs != "-j1":
+                    self.skip_if_multiprocessing_blocked(result)
+                await self.assert_success(result)
+                self.assertIn("tests ran: 4", result.output)
 
     async def test_pytest_compat_anyio_backends(self) -> None:
         self.use_fixture("pytestcompat")

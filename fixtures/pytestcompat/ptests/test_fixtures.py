@@ -64,6 +64,18 @@ def test_override_and_conftest(overridden_fixture, conftest_fixture):
     assert conftest_fixture == "from-conftest"
 
 
+def test_monkeypatch_unknown_import_path(monkeypatch):
+    with pytest.raises(ImportError):
+        monkeypatch.setattr("ggt_no_such_module_exists.attr", None)
+
+
+def test_capsys_has_real_encoding(capsys):
+    import sys
+
+    print("capsys encoding check".encode(sys.stdout.encoding, "replace"))
+    assert capsys.readouterr().out.startswith("b'capsys")
+
+
 def test_request_features(request, tmp_path_factory):
     assert request.node.name == "test_request_features"
     assert request.getfixturevalue("conftest_fixture") == "from-conftest"
