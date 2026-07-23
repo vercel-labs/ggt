@@ -1,0 +1,178 @@
+name: "Setup ggt"
+description: >-
+  Install ggt (go-go test) from PyPI into the active Python environment
+  and persist .ggt_cache (test timing data used for shard balancing and
+  parallel scheduling) across workflow runs.
+branding:
+  icon: fast-forward
+  color: purple
+
+inputs:
+  install:
+    description: >-
+      Whether to install ggt. Set to "false" to skip installation and
+      only persist the .ggt_cache timing cache, e.g. when ggt is already
+      installed as part of the project dependencies.
+    default: "true"
+  version:
+    description: >-
+      Exact ggt version to install (e.g. "1.1.1"). Empty means the
+      latest release on PyPI. Version ranges are not supported.
+    default: ""
+  extras:
+    description: >-
+      Comma-separated extras to install, e.g. "coverage,pytest".
+    default: ""
+  enable-cache:
+    description: >-
+      Persist .ggt_cache (test timing data) across runs with
+      actions/cache. "true" or "false".
+    default: "true"
+  cache-dependency-glob:
+    description: >-
+      Glob pattern(s), newline-separated, hashed into the cache restore
+      key so caches roll over when dependencies change.
+    default: "**/pyproject.toml"
+  cache-suffix:
+    description: >-
+      Extra discriminator appended to the cache key (e.g. a shard id or
+      matrix leg), to keep parallel jobs from sharing one cache slot.
+    default: ""
+  working-directory:
+    description: >-
+      Directory where ggt will be invoked (where .ggt_cache lives).
+    default: "."
+
+outputs:
+  ggt-version:
+    description: >-
+      The concrete ggt version that was installed. Empty when
+      installation was skipped with install: false.
+    value: ${{ steps.install.outputs.ggt-version }}
+  cache-hit:
+    description: Whether timing data (.ggt_cache) was restored from cache.
+    value: ${{ steps.cache-check.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Find Python
+      id: python
+      shell: bash
+      run: |
+        if command -v python >/dev/null 2>&1; then
+          PY=python
+        elif command -v python3 >/dev/null 2>&1; then
+          PY=python3
+        else
+          echo "::error title=setup-ggt::No Python interpreter on PATH." \
+            " Run actions/setup-python (or equivalent) before this action."
+          exit 1
+        fi
+        if ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+          echo "::error title=setup-ggt::ggt requires Python >= 3.11;" \
+            " found $("$PY" -V)."
+          exit 1
+        fi
+        echo "python-cmd=$PY" >> "$GITHUB_OUTPUT"
+        PYVER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+        echo "python-version=$PYVER" >> "$GITHUB_OUTPUT"
+
+    - name: Install ggt
+      id: install
+      if: ${{ inputs.install == 'true' }}
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        EXTRAS: ${{ inputs.extras }}
+        PY: ${{ steps.python.outputs.python-cmd }}
+      run: |
+        if ! "$PY" -m pip --version >/dev/null 2>&1; then
+          echo "::error title=setup-ggt::pip is not available in the active" \
+            " environment (tried '$PY -m pip'). Use actions/setup-python," \
+            " which provides pip."
+          exit 1
+        fi
+        if [ -n "$VERSION" ]; then
+          # Exact PEP 440 releases only (optionally pre/post/dev), no ranges.
+          if ! printf '%s' "$VERSION" \
+              | grep -Eq '^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$'; then
+            echo "::error title=setup-ggt::'version' must be an exact version" \
+              " (e.g. 1.1.1) or empty for latest; ranges are not supported."
+            exit 1
+          fi
+        fi
+        if [ -n "$EXTRAS" ]; then
+          if ! printf '%s' "$EXTRAS" | grep -Eq '^[A-Za-z0-9_.,-]+$'; then
+            echo "::error title=setup-ggt::'extras' must be a comma-separated" \
+              " list of extra names, e.g. coverage,pytest"
+            exit 1
+          fi
+        fi
+
+        REQ="ggt"
+        if [ -n "$EXTRAS" ]; then
+          REQ="${REQ}[$EXTRAS]"
+        fi
+        if [ -n "$VERSION" ]; then
+          REQ="$REQ==$VERSION"
+        fi
+
+        echo "::group::Installing $REQ"
+        "$PY" -m pip install --upgrade --disable-pip-version-check "$REQ"
+        echo "::endgroup::"
+
+        INSTALLED=$("$PY" -c 'import importlib.metadata as m; print(m.version("ggt"))')
+        if [ -n "$VERSION" ] && [ "$INSTALLED" != "$VERSION" ]; then
+          echo "::error title=setup-ggt::Expected ggt $VERSION but found $INSTALLED."
+          exit 1
+        fi
+        if ! command -v ggt >/dev/null 2>&1; then
+          echo "::error title=setup-ggt::'ggt' is not on PATH after install."
+          exit 1
+        fi
+        ggt --version
+        echo "ggt-version=$INSTALLED" >> "$GITHUB_OUTPUT"
+
+    - name: Compute cache key
+      id: cache-key
+      if: ${{ inputs.enable-cache == 'true' }}
+      shell: bash
+      env:
+        SUFFIX: ${{ inputs.cache-suffix }}
+        PYVER: ${{ steps.python.outputs.python-version }}
+      run: |
+        BASE="setup-ggt-${RUNNER_OS}-py${PYVER}"
+        if [ -n "$SUFFIX" ]; then
+          BASE="$BASE-$SUFFIX"
+        fi
+        echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+    - name: Restore .ggt_cache
+      if: ${{ inputs.enable-cache == 'true' }}
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ inputs.working-directory }}/.ggt_cache
+        # Rolling key: unique per run, so the post step saves fresh timing
+        # data every run; restores fall through to the newest prefix match.
+        key: ${{ steps.cache-key.outputs.base }}-${{ hashFiles(inputs.cache-dependency-glob) }}-${{ github.run_id }}
+        restore-keys: |
+          ${{ steps.cache-key.outputs.base }}-${{ hashFiles(inputs.cache-dependency-glob) }}-
+          ${{ steps.cache-key.outputs.base }}-
+
+    - name: Report cache status
+      id: cache-check
+      shell: bash
+      env:
+        ENABLE_CACHE: ${{ inputs.enable-cache }}
+        WORKDIR: ${{ inputs.working-directory }}
+      run: |
+        # actions/cache reports cache-hit only on an exact key match, which
+        # a rolling run_id key never produces; check restored files instead.
+        if [ "$ENABLE_CACHE" = "true" ] \
+            && [ -f "$WORKDIR/.ggt_cache/running_times.csv" ]; then
+          echo "Restored ggt timing data in $WORKDIR/.ggt_cache"
+          echo "cache-hit=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "cache-hit=false" >> "$GITHUB_OUTPUT"
+        fi
