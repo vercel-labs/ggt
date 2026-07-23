@@ -429,7 +429,33 @@ def _get_module_spec(modname: str) -> importlib.machinery.ModuleSpec:
     return spec
 
 
+class _PickledState:
+    """A test case's ``__dict__`` pre-serialized by ``_reduce_TestCase``."""
+
+    __slots__ = ("data",)
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (_PickledState, (self.data,))
+
+
+_class_import_locations: dict[type[Any], _ImportLocation] = {}
+
+
 def _get_class_import_location(cls: type[Any]) -> _ImportLocation:
+    # Memoized: a test case class is reduced once per result-channel
+    # message, so the spec lookup and stat calls below would otherwise
+    # run thousands of times per run.
+    loc = _class_import_locations.get(cls)
+    if loc is None:
+        loc = _compute_class_import_location(cls)
+        _class_import_locations[cls] = loc
+    return loc
+
+
+def _compute_class_import_location(cls: type[Any]) -> _ImportLocation:
     top_mod, _, _ = cls.__module__.partition(".")
     top_level = _get_module_spec(top_mod)
     if not top_level.has_location:
@@ -475,8 +501,14 @@ def _restore_TestCase(
     state: object,
 ) -> unittest.TestCase:
     search_paths, modname, clsname = clsloc
-    with _sys_path(*search_paths):
-        mod = importlib.import_module(modname)
+    mod = sys.modules.get(modname)
+    if mod is None:
+        # First restore of this module in the process; subsequent
+        # restores hit sys.modules directly, skipping the sys.path
+        # manipulation (and its importlib cache invalidation, which
+        # is expensive enough to matter per result-channel message).
+        with _sys_path(*search_paths):
+            mod = importlib.import_module(modname)
 
     if pytest_compat.is_enabled():
         # Re-create synthesized TestCase classes (and xunit module
@@ -488,6 +520,9 @@ def _restore_TestCase(
     cls = getattr(mod, clsname)
     if not issubclass(cls, unittest.TestCase):
         raise RuntimeError(f"unexpected non-TestCase type: {cls}")
+
+    if isinstance(state, _PickledState):
+        state = pickle.loads(state.data)  # noqa: S301
 
     test: unittest.TestCase = cls.__new__(cls, *newargs[0], **newargs[1])
     if callable(setstate := getattr(test, "__setstate__", None)):
@@ -536,16 +571,23 @@ def _reduce_TestCase(
         state = None
 
     if isinstance(state, Mapping):
-        # Check state contents for pickleability
-        # and exclude attributes that are unpickleable.
-        # Technically this is unsound, but the runner
-        # infrastructure should not depend on any of those.
+        # Pre-serialize the state so unpickleable attributes can be
+        # excluded.  Technically this is unsound, but the runner
+        # infrastructure should not depend on any of those.  The happy
+        # path (fully pickleable state) costs a single dumps() here —
+        # the outer pickler then only copies the bytes — instead of a
+        # trial dumps() per attribute plus a full re-pickle.
         state = {**state}
-        for k, v in [*state.items()]:
-            try:
-                pickle.dumps(v)
-            except Exception:
-                state.pop(k)
+        try:
+            blob = pickle.dumps(state)
+        except Exception:
+            for k, v in [*state.items()]:
+                try:
+                    pickle.dumps(v)
+                except Exception:
+                    state.pop(k)
+            blob = pickle.dumps(state)
+        state = _PickledState(blob)
 
     return _restore_TestCase, (clsloc, (newargs, newkwargs), state)
 
