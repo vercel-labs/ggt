@@ -1326,7 +1326,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             "simple",
         )
         await self.assert_success(result)
-        self.assertIn("tests ran: 12", result.output)
+        self.assertIn("tests ran: 17", result.output)
         # The inert conftest plugin hook is reported, in the warning
         # summary, exactly once.
         self.assertIn("WARNING: test collection", result.output)
@@ -1360,7 +1360,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         cases = [
             ("slow", 2),
             ("slow and not integration", 1),
-            ("not slow", 10),
+            ("not slow", 15),
         ]
         *results, invalid = await asyncio.gather(
             *(

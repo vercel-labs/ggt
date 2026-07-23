@@ -5,6 +5,7 @@
 import logging
 import os
 import warnings
+from unittest import mock
 
 import pytest
 
@@ -68,6 +69,56 @@ def test_config_getoption(request):
     # ggt's -X options back request.config.
     assert request.config.getoption("color") == "blue"
     assert request.config.getoption("--color") == "blue"
+
+
+def _patch_me():
+    return "real"
+
+
+def _patch_me_too():
+    return "real too"
+
+
+@mock.patch(f"{__name__}._patch_me")
+def test_mock_patch_arg(mock_helper):
+    mock_helper.return_value = "mocked"
+    assert _patch_me() == "mocked"
+
+
+@mock.patch(f"{__name__}._patch_me")
+@mock.patch(f"{__name__}._patch_me_too")
+def test_mock_patch_stacked(mock_too, mock_helper):
+    mock_helper.return_value = "mocked"
+    mock_too.return_value = "mocked too"
+    assert _patch_me() == "mocked"
+    assert _patch_me_too() == "mocked too"
+
+
+@mock.patch(f"{__name__}._patch_me")
+def test_mock_patch_with_fixture(mock_helper, monkeypatch):
+    monkeypatch.setenv("GGT_MOCK_FIXTURE_CHECK", "yes")
+    mock_helper.return_value = "mocked"
+    assert _patch_me() == "mocked"
+    assert os.environ["GGT_MOCK_FIXTURE_CHECK"] == "yes"
+
+
+@mock.patch(f"{__name__}._patch_me", new=lambda: "swapped")
+def test_mock_patch_explicit_new(monkeypatch):
+    # An explicit replacement consumes no test argument; the
+    # remaining parameter is a real fixture request.
+    monkeypatch.setenv("GGT_MOCK_NEW_CHECK", "yes")
+    assert _patch_me() == "swapped"
+    assert os.environ["GGT_MOCK_NEW_CHECK"] == "yes"
+
+
+class TestMockPatchMethods:
+    @mock.patch(f"{__name__}._patch_me")
+    @mock.patch(f"{__name__}._patch_me_too")
+    def test_mock_patch_method(self, mock_too, mock_helper):
+        mock_helper.return_value = "mocked"
+        mock_too.return_value = "mocked too"
+        assert _patch_me() == "mocked"
+        assert _patch_me_too() == "mocked too"
 
 
 @pytest.mark.slow
