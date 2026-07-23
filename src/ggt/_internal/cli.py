@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import importlib.util
 import multiprocessing
 import os
@@ -35,6 +36,7 @@ from . import (
     runner,
     styles,
 )
+from .ndjson import NDJSONEmitter
 from . import preload as preload_mod
 from .decorators import (
     _xfail,
@@ -377,6 +379,7 @@ def test(
                 "Warning: both --quiet and --verbose are "
                 "specified, assuming --quiet.",
                 fg="yellow",
+                err=True,
             )
         verbosity = 0
     elif verbose:
@@ -393,6 +396,7 @@ def test(
                 f"Error: --cov argument {pkg!r} looks like a path, "
                 f"expected a Python package name",
                 fg="red",
+                err=True,
             )
             sys.exit(1)
 
@@ -402,6 +406,7 @@ def test(
             f"Enable it with: uv add --dev {_COVERAGE_EXTRA}\n"
             f"Or install it with: python -m pip install '{_COVERAGE_EXTRA}'",
             fg="red",
+            err=True,
         )
         sys.exit(1)
 
@@ -413,6 +418,7 @@ def test(
             "Enable it with: uv add --dev ggt[pytest]\n"
             "Or install it with: python -m pip install 'ggt[pytest]'",
             fg="red",
+            err=True,
         )
         sys.exit(1)
 
@@ -430,7 +436,7 @@ def test(
         try:
             mark_filter = marks.compile_mark_expression(mark_expr)
         except marks.MarkError as e:
-            console.secho(f"Error: {e}", fg="red")
+            console.secho(f"Error: {e}", fg="red", err=True)
             sys.exit(1)
 
     mproc_fixes.patch_multiprocessing(debug=debug)
@@ -445,12 +451,30 @@ def test(
         console.secho(
             "Error: cannot use stacked output format in verbose mode.",
             fg="red",
+            err=True,
         )
         sys.exit(1)
 
+    ndjson: NDJSONEmitter | None = None
+    if output_format is runner.OutputFormat.json:
+        if not capture:
+            # With -j1 uncaptured test output writes to the real fd 1
+            # and would corrupt the NDJSON stream.
+            console.secho(
+                "Error: cannot use --no-capture with the json output format.",
+                fg="red",
+                err=True,
+            )
+            sys.exit(1)
+        # Bind the real stdout now: capture redirects fd 1 later (in
+        # this very process for sequential runs).
+        ndjson = NDJSONEmitter.for_stdout()
+
     if repeat < 1:
         console.secho(
-            "Error: --repeat must be a positive non-zero number.", fg="red"
+            "Error: --repeat must be a positive non-zero number.",
+            fg="red",
+            err=True,
         )
         sys.exit(1)
 
@@ -470,24 +494,27 @@ def test(
                     "Error: no test path specified and no "
                     '"tests" directory found',
                     fg="red",
+                    err=True,
                 )
                 sys.exit(1)
 
     for file in files:
         if not os.path.exists(file):
             console.secho(
-                f"Error: test path {file!r} does not exist", fg="red"
+                f"Error: test path {file!r} does not exist", fg="red", err=True
             )
             sys.exit(1)
 
     try:
         selected_shard, total_shards = map(int, shard.split("/"))
     except ValueError:
-        console.secho(f"Error: --shard {shard} must match format e.g. 2/5")
+        console.secho(
+            f"Error: --shard {shard} must match format e.g. 2/5", err=True
+        )
         sys.exit(1)
 
     if selected_shard < 1 or selected_shard > total_shards:
-        console.secho(f"Error: --shard {shard} is out of bound")
+        console.secho(f"Error: --shard {shard} is out of bound", err=True)
         sys.exit(1)
 
     def run() -> int:
@@ -513,13 +540,28 @@ def test(
             result_log=result_log,
             include_unsuccessful=include_unsuccessful,
             options=option,
+            ndjson=ndjson,
         )
 
-    if cov:
-        with _coverage_wrapper(cov):
+    try:
+        if cov:
+            with _coverage_wrapper(cov):
+                result = run()
+        else:
             result = run()
-    else:
-        result = run()
+    except KeyboardInterrupt:
+        if ndjson is not None:
+            ndjson.event(
+                "interrupted",
+                level="ERROR",
+                stage="summary",
+                status="failed",
+                clear_label=True,
+            )
+        raise
+    finally:
+        if ndjson is not None:
+            ndjson.close()
 
     sys.exit(result)
 
@@ -585,6 +627,77 @@ def _coverage_wrapper(paths: list[str]) -> Iterator[None]:
             shutil.copy(covfile, ".")
 
 
+def _emit_result_events(
+    ndjson: NDJSONEmitter, result: results.TestResult
+) -> None:
+    """Emit the end-of-run result as NDJSON events.
+
+    Per-case detail events carry the full captured traceback/output
+    under ``ggt.detail`` and deliberately have no ``message``: the
+    concise real-time ERROR event already reported each failure, so
+    log renderers skip these while raw NDJSON consumers get the data.
+    """
+    detail_kinds = (
+        ("failure", result.failures),
+        ("error", result.errors),
+        ("unexpected_success", result.unexpected_successes),
+    )
+    for kind, cases in detail_kinds:
+        for case in cases:
+            ndjson.event(
+                level="ERROR",
+                stage="summary",
+                extra={
+                    "ggt.detail": {
+                        "kind": kind,
+                        **dataclasses.asdict(case),
+                    }
+                },
+            )
+
+    counts = {
+        "failures": len(result.failures),
+        "errors": len(result.errors),
+        "unexpected_successes": len(result.unexpected_successes),
+        "not_implemented": len(result.not_implemented),
+        "skipped": len(result.skipped),
+        "expected_failures": len(result.expected_failures),
+        "warnings": len(result.warnings),
+    }
+    problems = ", ".join(
+        f"{count} {name.replace('_', ' ')}"
+        for name, count in counts.items()
+        if count and name in {"failures", "errors", "unexpected_successes"}
+    )
+    time_taken = results._format_time(
+        result.setup_time_taken + result.tests_time_taken
+    )
+    outcome = "SUCCESS" if result.was_successful else "FAILURE"
+    message = f"{outcome}: {result.testsRun} tests"
+    if problems:
+        message += f", {problems}"
+    message += f" in {time_taken}"
+    ndjson.event(
+        message,
+        level="INFO" if result.was_successful else "ERROR",
+        stage="summary",
+        status="finished",
+        description=message,
+        completed=result.testsRun,
+        total=result.testsRun,
+        clear_label=True,
+        extra={
+            "ggt.summary": {
+                "was_successful": result.was_successful,
+                "tests_run": result.testsRun,
+                "setup_time_taken": result.setup_time_taken,
+                "tests_time_taken": result.tests_time_taken,
+                **counts,
+            }
+        },
+    )
+
+
 def _run(
     *,
     include: list[str],
@@ -608,6 +721,7 @@ def _run(
     result_log: str | None,
     include_unsuccessful: bool,
     options: dict[str, str],
+    ndjson: NDJSONEmitter | None = None,
 ) -> int:
     total = 0
     total_unfiltered = 0
@@ -616,7 +730,14 @@ def _run(
         nonlocal total, total_unfiltered
         total += n
         total_unfiltered += unfiltered_n
-        if verbosity > 0:
+        if ndjson is not None:
+            # No total: collection progress is indeterminate until
+            # discovery completes.
+            ndjson.event(
+                description=f"collected {total}/{total_unfiltered} tests",
+                completed=total,
+            )
+        elif verbosity > 0:
             console.echo(
                 styles.status(
                     f"Collected {total}/{total_unfiltered} tests.\r"
@@ -640,17 +761,30 @@ def _run(
     # Warnings emitted during collection (e.g. conftest compatibility
     # notices) go to the end-of-run warning summary; in --list mode
     # there is no summary, so let them print through.
-    with runner.recorded_warnings(
-        enabled=warnings and not list_tests
-    ) as collection_warnings:
-        suite = loader.discover(
-            files,
-            verbosity=verbosity,
-            include=include,
-            exclude=exclude,
-            progress_cb=update_progress,
-            mark_filter=mark_filter,
-        )
+    with (
+        ndjson.stage("collect")
+        if ndjson is not None
+        else contextlib.nullcontext()
+    ):
+        with runner.recorded_warnings(
+            enabled=warnings and not list_tests
+        ) as collection_warnings:
+            suite = loader.discover(
+                files,
+                verbosity=verbosity,
+                include=include,
+                exclude=exclude,
+                progress_cb=update_progress,
+                mark_filter=mark_filter,
+            )
+        if ndjson is not None:
+            ndjson.event(
+                f"collected {total_unfiltered} tests, selected {total}",
+                description=(
+                    f"collected {total_unfiltered} tests, selected {total}"
+                ),
+                completed=total,
+            )
 
     if preload:
         # Record the post-discovery module set to warm up the next
@@ -658,16 +792,28 @@ def _run(
         preload_mod.save_module_cache()
 
     if list_tests:
-        console.echo(err=True)
         cases = loader.get_test_cases([suite])
-        for test_group in cases.values():
-            for test in test_group:
-                console.echo(str(test))
+        if ndjson is not None:
+            for test_group in cases.values():
+                for test in test_group:
+                    ndjson.event(
+                        str(test),
+                        stage="collect",
+                        extra={"ggt.test": test.id()},
+                    )
+        else:
+            console.echo(err=True)
+            for test_group in cases.values():
+                for test in test_group:
+                    console.echo(str(test))
         return 0
 
     jobs = max(min(total, jobs), 1)
 
-    if verbosity > 0:
+    if ndjson is not None:
+        if jobs > 1:
+            ndjson.event(f"using up to {jobs} processes to run tests")
+    elif verbosity > 0:
         console.echo()
         if jobs > 1:
             console.echo(
@@ -677,7 +823,15 @@ def _run(
     result = None
     for rnum in range(repeat):
         if repeat > 1:
-            console.echo(styles.status(f"Repeat #{rnum + 1} out of {repeat}."))
+            if ndjson is not None:
+                ndjson.event(
+                    f"repeat #{rnum + 1} out of {repeat}",
+                    extra={"ggt.repeat": f"{rnum + 1}/{repeat}"},
+                )
+            else:
+                console.echo(
+                    styles.status(f"Repeat #{rnum + 1} out of {repeat}.")
+                )
 
         test_runner = runner.ParallelTextTestRunner(
             verbosity=verbosity,
@@ -689,6 +843,7 @@ def _run(
             shuffle=shuffle,
             distribute=distribute,
             options=options,
+            ndjson=ndjson,
         )
 
         result = test_runner.run(
@@ -699,7 +854,9 @@ def _run(
             collection_warnings=collection_warnings,
         )
 
-        if verbosity > 0:
+        if ndjson is not None:
+            _emit_result_events(ndjson, result)
+        elif verbosity > 0:
             results.render_result(test_runner.stream, result)
 
         if not result.was_successful:

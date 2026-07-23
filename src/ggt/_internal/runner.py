@@ -49,6 +49,7 @@ from . import cpython_state
 from . import console
 from . import fixtures
 from . import loader
+from .ndjson import JSONUI, NDJSONEmitter
 from . import mproc_fixes
 from . import pytest_compat
 from . import styles
@@ -680,7 +681,10 @@ class ParallelTestSuite(unittest.TestSuite):
                         for p in pool._pool:  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
                             if p.exitcode:
                                 if isinstance(result, ParallelTextTestResult):
-                                    result.current_pids.get(p.pid)
+                                    result.ren.report_worker_crash(
+                                        p.pid,
+                                        result.current_pids.get(p.pid),
+                                    )
                                 sys.stderr.flush()
                                 os._exit(1)
 
@@ -758,6 +762,9 @@ class OutputFormat(enum.Enum):
     stacked = "stacked"
     verbose = "verbose"
     silent = "silent"
+    # Machine-readable NDJSON on stdout.  Never chosen by ``auto``
+    # resolution: it must be requested explicitly.
+    json = "json"
 
 
 class BaseRenderer:
@@ -802,6 +809,7 @@ class BaseRenderer:
         description: str | None = None,
         *,
         currently_running: Sequence[unittest.TestCase],
+        excinfo: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -816,6 +824,11 @@ class BaseRenderer:
     def report_still_running(self, still_running: dict[str, float]) -> None:
         return
 
+    def report_worker_crash(
+        self, pid: int | None, test: unittest.TestCase | None
+    ) -> None:
+        return
+
 
 class SimpleRenderer(BaseRenderer):
     def report(
@@ -825,6 +838,7 @@ class SimpleRenderer(BaseRenderer):
         description: str | None = None,
         *,
         currently_running: Sequence[unittest.TestCase],
+        excinfo: str | None = None,
     ) -> None:
         console.echo(
             self.styles_map[marker.value](marker.value),
@@ -841,6 +855,7 @@ class SilentRenderer(BaseRenderer):
         description: str | None = None,
         *,
         currently_running: Sequence[unittest.TestCase],
+        excinfo: str | None = None,
     ) -> None:
         pass
 
@@ -872,6 +887,7 @@ class VerboseRenderer(BaseRenderer):
         description: str | None = None,
         *,
         currently_running: Sequence[unittest.TestCase],
+        excinfo: str | None = None,
     ) -> None:
         style = self.styles_map[marker.value]
         console.echo(
@@ -930,6 +946,7 @@ class MultiLineRenderer(BaseRenderer):
         description: str | None = None,
         *,
         currently_running: Sequence[unittest.TestCase],
+        excinfo: str | None = None,
     ) -> None:
         if marker in {Markers.failed, Markers.errored}:
             test_name = test.id().rpartition(".")[2]
@@ -1135,6 +1152,106 @@ class MultiLineRenderer(BaseRenderer):
         self.last_lines = len(lines)
 
 
+class JSONRenderer(BaseRenderer):
+    """Report per-test events as NDJSON entries (json output format).
+
+    Test outcomes that constitute a run failure are emitted at ERROR
+    level so consumers surface them immediately; everything else stays
+    at INFO and only advances the progress counters.
+    """
+
+    marker_levels: ClassVar[dict[Markers, str]] = {
+        Markers.passed: "INFO",
+        Markers.errored: "ERROR",
+        Markers.skipped: "INFO",
+        Markers.failed: "ERROR",
+        Markers.xfailed: "INFO",
+        Markers.not_implemented: "INFO",
+        Markers.upassed: "WARNING",
+    }
+
+    marker_labels: ClassVar[dict[Markers, str]] = {
+        Markers.passed: "PASSED",
+        Markers.errored: "ERROR",
+        Markers.skipped: "SKIPPED",
+        Markers.failed: "FAILED",
+        Markers.xfailed: "XFAIL",
+        Markers.not_implemented: "NOT IMPLEMENTED",
+        Markers.upassed: "UNEXPECTED SUCCESS",
+    }
+
+    def __init__(
+        self,
+        *,
+        tests: Sequence[unittest.TestSuite | unittest.TestCase],
+        stream: TextIO,
+        ndjson: NDJSONEmitter,
+    ) -> None:
+        super().__init__(tests=tests, stream=stream)
+        self.ndjson = ndjson
+        self.total_tests = len(tests)
+        self.completed_tests = 0
+
+    def report(
+        self,
+        test: unittest.TestCase,
+        marker: Markers,
+        description: str | None = None,
+        *,
+        currently_running: Sequence[unittest.TestCase],
+        excinfo: str | None = None,
+    ) -> None:
+        # Subtest failures report without a corresponding startTest, so
+        # clamp instead of letting the counter run past the total (the
+        # stacked renderer tolerates the same skew).
+        self.completed_tests = min(self.completed_tests + 1, self.total_tests)
+        test_id = test.id()
+        message = f"{self.marker_labels[marker]} {test_id}"
+        if excinfo is not None and (concise := self._concise_error(excinfo)):
+            message = f"{message}: {concise}"
+        elif description:
+            message = f"{message}: {description}"
+        extra: dict[str, Any] = {
+            "ggt.test": test_id,
+            "ggt.marker": marker.name,
+        }
+        if excinfo is not None:
+            extra["ggt.traceback"] = excinfo
+        if description:
+            extra["ggt.reason"] = description
+        self.ndjson.event(
+            message,
+            level=self.marker_levels[marker],
+            description=test_id,
+            completed=self.completed_tests,
+            total=self.total_tests,
+            extra=extra,
+        )
+
+    def report_still_running(self, still_running: dict[str, float]) -> None:
+        items = ", ".join(
+            f"{test} ({duration:.1f}s)"
+            for test, duration in still_running.items()
+        )
+        self.ndjson.event(f"still running: {items}", status_only=True)
+
+    def report_worker_crash(
+        self, pid: int | None, test: unittest.TestCase | None
+    ) -> None:
+        detail = f" while running {test.id()}" if test is not None else ""
+        self.ndjson.event(
+            f"worker process crashed (pid={pid}){detail}",
+            level="ERROR",
+            extra={"ggt.worker_pid": pid}
+            | ({"ggt.test": test.id()} if test is not None else {}),
+        )
+
+    @staticmethod
+    def _concise_error(excinfo: str) -> str | None:
+        lines = [line for line in excinfo.strip().splitlines() if line.strip()]
+        return lines[-1].strip() if lines else None
+
+
 class ParallelTextTestResult(unittest.result.TestResult):
     def __init__(
         self,
@@ -1146,6 +1263,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
         output_format: OutputFormat = OutputFormat.auto,
         failfast: bool = False,
         suite: ParallelTestSuite | SequentialTestSuite,
+        ndjson: NDJSONEmitter | None = None,
     ) -> None:
         super().__init__(stream, descriptions=False, verbosity=verbosity)
         self.verbosity = verbosity
@@ -1173,7 +1291,10 @@ class ParallelTextTestResult(unittest.result.TestResult):
         self.suite = suite
         self.ren: BaseRenderer
 
-        if output_format is OutputFormat.verbose or (
+        if output_format is OutputFormat.json:
+            assert ndjson is not None
+            self.ren = JSONRenderer(tests=tests, stream=stream, ndjson=ndjson)
+        elif output_format is OutputFormat.verbose or (
             output_format is OutputFormat.auto and self.verbosity > 1
         ):
             self.ren = VerboseRenderer(tests=tests, stream=stream)
@@ -1194,6 +1315,8 @@ class ParallelTextTestResult(unittest.result.TestResult):
         test: unittest.TestCase,
         marker: Markers,
         description: str | None = None,
+        *,
+        err: Any = None,
     ) -> None:
         self.currently_running.pop(test, None)
         self.ren.report(
@@ -1201,7 +1324,25 @@ class ParallelTextTestResult(unittest.result.TestResult):
             marker,
             description,
             currently_running=list(self.currently_running),
+            excinfo=self._format_excinfo(test, err),
         )
+
+    def _format_excinfo(self, test: unittest.TestCase, err: Any) -> str | None:
+        """Normalize a test error to its formatted-traceback string.
+
+        Parallel workers serialize errors to strings before channeling
+        them; sequential runs deliver live ``exc_info`` tuples, and
+        server errors arrive as :class:`SerializedServerError`.
+        """
+        if err is None:
+            return None
+        if _is_exc_info(err):
+            return results.exc_info_to_string(self, err, test)
+        if isinstance(err, SerializedServerError):
+            return err.test_error
+        if isinstance(err, str):
+            return err
+        return None
 
     def report_still_running(self) -> None:
         now = time.monotonic()
@@ -1272,7 +1413,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
         self, test: unittest.TestCase, err: results.OptExcInfo
     ) -> None:
         super().addError(test, err)
-        self.report_progress(test, Markers.errored)
+        self.report_progress(test, Markers.errored, err=err)
         if self.failfast:
             self.suite.stop_requested = True
 
@@ -1280,7 +1421,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
         self, test: unittest.TestCase, err: results.OptExcInfo
     ) -> None:
         super().addFailure(test, err)
-        self.report_progress(test, Markers.failed)
+        self.report_progress(test, Markers.failed, err=err)
         if self.failfast:
             self.suite.stop_requested = True
 
@@ -1298,6 +1439,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
                 subtest,
                 Markers.errored,
                 currently_running=list(self.currently_running),
+                excinfo=self._format_excinfo(subtest, err),
             )
             if self.failfast:
                 self.suite.stop_requested = True
@@ -1341,7 +1483,12 @@ class ParallelTextTestResult(unittest.result.TestResult):
                 marker = Markers.errored
                 super().addError(test, err)
 
-        self.report_progress(test, marker, reason)
+        self.report_progress(
+            test,
+            marker,
+            reason,
+            err=err if marker in {Markers.failed, Markers.errored} else None,
+        )
 
     def addUnexpectedSuccess(self, test: unittest.TestCase) -> None:
         method = getattr(test, test._testMethodName, None)
@@ -1401,6 +1548,7 @@ class ParallelTextTestRunner:
         options: Mapping[str, str] | None = None,
         distribute: str = "module",
         capture_output: bool = True,
+        ndjson: NDJSONEmitter | None = None,
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
         self.distribute = distribute
@@ -1411,7 +1559,12 @@ class ParallelTextTestRunner:
         self.failfast = failfast
         self.shuffle = shuffle
         self.output_format = output_format
-        self.ui = styles.ConsoleUI(verbosity=verbosity, stream=self.stream)
+        self.ndjson = ndjson
+        self.ui: loader.UI
+        if ndjson is not None:
+            self.ui = JSONUI(ndjson)
+        else:
+            self.ui = styles.ConsoleUI(verbosity=verbosity, stream=self.stream)
         self.options = {**options} if options is not None else {}
 
     def run(
@@ -1449,7 +1602,10 @@ class ParallelTextTestRunner:
         dup_stream: TextIO | None = None
 
         try:
-            with self._recorded_warnings() as setup_warnings:
+            with (
+                self._ndjson_stage("setup"),
+                self._recorded_warnings() as setup_warnings,
+            ):
                 setup_stats = asyncio.run(
                     fixtures.setup_test_cases(
                         [*cases],
@@ -1520,6 +1676,7 @@ class ParallelTextTestRunner:
                 output_format=self.output_format,
                 tests=all_tests,
                 suite=suite,
+                ndjson=self.ndjson,
             )
             unittest.signals.registerResult(result)
 
@@ -1531,15 +1688,27 @@ class ParallelTextTestRunner:
             for wmsg in setup_warnings:
                 result.addWarning(setup_holder, wmsg)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
 
-            self.ui.info("\nRunning tests\n\n")
-            suite.run(result)
-            if not isinstance(result.ren, MultiLineRenderer):
+            if self.ndjson is None:
+                self.ui.info("\nRunning tests\n\n")
+            with self._ndjson_stage(
+                "run",
+                total=len(all_tests),
+                message=f"running {len(all_tests)} tests",
+                extra={"ggt.shard": f"{selected_shard}/{total_shards}"},
+            ):
+                suite.run(result)
+            if self.ndjson is None and not isinstance(
+                result.ren, MultiLineRenderer
+            ):
                 # Terminate the progress output (e.g. the simple
                 # renderer's dot line); the stacked renderer's frame
                 # is already newline-terminated.
                 self.ui.info("\n")
 
-            with self._recorded_warnings() as teardown_warnings:
+            with (
+                self._ndjson_stage("teardown"),
+                self._recorded_warnings() as teardown_warnings,
+            ):
                 teardown_stats = asyncio.run(
                     fixtures.tear_down_test_cases(
                         [*cases],
@@ -1578,9 +1747,13 @@ class ParallelTextTestRunner:
             if dup_stream is not None:
                 with contextlib.suppress(Exception):
                     dup_stream.close()
-            if self.verbosity == 1 and not (
-                result is not None
-                and isinstance(result.ren, MultiLineRenderer)
+            if (
+                self.ndjson is None
+                and self.verbosity == 1
+                and not (
+                    result is not None
+                    and isinstance(result.ren, MultiLineRenderer)
+                )
             ):
                 self._echo()
 
@@ -1591,6 +1764,20 @@ class ParallelTextTestRunner:
     def _echo(self, s: str = "", **kwargs: Any) -> None:
         if self.verbosity > 0:
             console.secho(s, file=self.stream, **kwargs)
+
+    def _ndjson_stage(
+        self,
+        name: str,
+        *,
+        total: int | None = None,
+        message: str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> AbstractContextManager[None]:
+        if self.ndjson is None:
+            return contextlib.nullcontext()
+        return self.ndjson.stage(
+            name, total=total, message=message, extra=extra
+        )
 
     def _recorded_warnings(
         self,
