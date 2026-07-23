@@ -1155,6 +1155,43 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                 await self.assert_success(result)
                 self.assertIn("tests ran: 4", result.output)
 
+    async def test_pytest_compat_ignore_collect_hook(self) -> None:
+        # conftest pytest_ignore_collect hooks prune files and whole
+        # directories (before importing anything inside them); the
+        # nearest conftest gets the first say.
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "ignorecollect",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 2", result.output)
+        self.assertNotIn("defines pytest plugin hooks", result.output)
+
+        listed = await self.run_ggt("ignorecollect", "--list")
+        await self.assert_success(listed)
+        self.assertIn("test_collected", listed.stdout)
+        self.assertIn("test_kept_by_nearest_conftest", listed.stdout)
+        self.assertNotIn("test_inside_skipped", listed.stdout)
+
+    async def test_pytest_compat_ignore_collect_legacy_signature(
+        self,
+    ) -> None:
+        # A pytest_ignore_collect hook with the legacy py.path
+        # signature is reported and ignored, not called.
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            "legacysig",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 1", result.output)
+        self.assertIn("ignoring: pytest_ignore_collect", result.output)
+
     async def test_pytest_compat_anyio_backends(self) -> None:
         self.use_fixture("pytestcompat")
 
