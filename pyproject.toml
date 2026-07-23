@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Testing :: Unit",
+    "Typing :: Typed",
 ]
 dependencies = [
     'typing-extensions >= 4.14.0',
