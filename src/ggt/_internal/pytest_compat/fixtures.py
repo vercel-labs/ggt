@@ -38,6 +38,7 @@ import types
 import unittest
 from typing import TYPE_CHECKING, Any, Self, cast
 
+from ..decorators import LOCAL_FIXTURE_ATTR
 from . import builtin_fixtures, discovery
 
 # Imported for their side effect of contributing to the builtin
@@ -120,6 +121,7 @@ class FixtureDef:
     source: str
     is_async: bool = False
     ids: object = None
+    local: bool = False
 
     def __hash__(self) -> int:
         return id(self)
@@ -219,6 +221,10 @@ def _make_fixture_def(
         source=source,
         is_async=is_async,
         ids=getattr(marker, "ids", None),
+        local=bool(
+            getattr(obj, LOCAL_FIXTURE_ATTR, False)
+            or getattr(func, LOCAL_FIXTURE_ATTR, False)
+        ),
     )
 
 

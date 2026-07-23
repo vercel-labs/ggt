@@ -6,6 +6,7 @@ import importlib.metadata
 
 from ._internal.decorators import (
     async_timeout,
+    local_fixture,
     not_implemented,
     skip,
     xerror,
@@ -15,6 +16,7 @@ from ._internal.marks import mark
 
 __all__ = (
     "async_timeout",
+    "local_fixture",
     "mark",
     "not_implemented",
     "skip",

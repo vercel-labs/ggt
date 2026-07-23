@@ -301,7 +301,18 @@ runner process, pickled, and shipped to all workers.  Fixture teardown
 cannot be pickled automatically fall back to lazy per-worker execution
 (pytest-xdist semantics) with a warning naming the fixture.  Set
 ``GGT_PYTEST_SHARED_FIXTURES=0`` to disable parent-process execution
-entirely.
+entirely.  To opt out a single fixture, decorate it with
+``@ggt.local_fixture``; fixtures that depend on it also remain local:
+
+.. code-block:: python
+
+   import ggt
+   import pytest
+
+   @ggt.local_fixture
+   @pytest.fixture(scope="session")
+   def api_client():
+       return make_api_client()
 
 Known deviations:
 

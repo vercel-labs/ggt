@@ -20,6 +20,20 @@ skip = unittest.skip
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R", covariant=True)
+_T = TypeVar("_T")
+
+LOCAL_FIXTURE_ATTR = "__ggt_local_fixture__"
+
+
+def local_fixture(fixture: _T) -> _T:
+    """Keep a pytest fixture local to each test worker.
+
+    Session- and module-scoped pytest fixtures are normally created in
+    ggt's runner process and pickled for workers.  Decorating one with
+    ``local_fixture`` opts it out of that sharing.
+    """
+    setattr(fixture, LOCAL_FIXTURE_ATTR, True)
+    return fixture
 
 
 def _xfail(
