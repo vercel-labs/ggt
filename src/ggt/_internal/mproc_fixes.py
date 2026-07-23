@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import logging
+import time
 import multiprocessing.pool
 import multiprocessing.process
 import multiprocessing.reduction
@@ -113,6 +114,36 @@ def join_exited_workers(pool: Any) -> None:
     pass
 
 
+def multiprocessing_help_stuff_finish(
+    inqueue: Any, task_handler: Any, size: int
+) -> None:
+    """Drain the inqueue at shutdown without wedging idle workers.
+
+    The upstream implementation acquires the inqueue read lock (to keep
+    draining pending tasks until the task handler is no longer blocked
+    writing to a full pipe) and never releases it.  Idle workers race
+    the pool for that same lock to read their shutdown sentinels; a
+    worker that loses the race — the drain may also eat its sentinel —
+    can never read again and sits blocked in ``get()`` for the whole
+    shutdown grace period in :func:`multiprocessing_worker_handler`
+    until the pool terminates it.  Upstream tolerates this because
+    stock pools terminate workers immediately; our graceful-shutdown
+    handler must not.  So: drain, then release the lock and re-send the
+    worker sentinels so every worker can exit cleanly.  Extra sentinels
+    are harmless — each worker consumes exactly one, and unread ones
+    disappear with the queue.
+    """
+    inqueue._rlock.acquire()
+    try:
+        while task_handler.is_alive() and inqueue._reader.poll():
+            inqueue._reader.recv()
+            time.sleep(0)
+    finally:
+        inqueue._rlock.release()
+    for _ in range(size):
+        inqueue.put(None)
+
+
 def _restore_Traceback() -> None:
     return None
 
@@ -143,6 +174,12 @@ def patch_multiprocessing(*, debug: bool) -> None:
         multiprocessing.pool.Pool._join_exited_workers  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
     )
     multiprocessing.pool.Pool._join_exited_workers = join_exited_workers  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+
+    # Keep shutdown sentinel delivery reliable so the graceful worker
+    # shutdown above does not stall (see multiprocessing_help_stuff_finish).
+    multiprocessing.pool.Pool._help_stuff_finish = staticmethod(  # type: ignore [attr-defined]  # ty: ignore[unresolved-attribute]
+        multiprocessing_help_stuff_finish
+    )
 
     patch_multiprocessing_reduction()
 
