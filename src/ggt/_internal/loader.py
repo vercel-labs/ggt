@@ -29,6 +29,7 @@ from .pytest_compat import synth as _pytest_synth
 if TYPE_CHECKING:
     import types
     from collections.abc import Callable, Iterable, Sequence
+    from contextlib import AbstractContextManager
 
 
 Client = TypeAliasType("Client", Any)
@@ -39,6 +40,7 @@ class UI(Protocol):
     def info(self, msg: str) -> None: ...
     def warning(self, msg: str) -> None: ...
     def error(self, msg: str) -> None: ...
+    def stage(self, msg: str) -> AbstractContextManager[None]: ...
 
 
 @runtime_checkable

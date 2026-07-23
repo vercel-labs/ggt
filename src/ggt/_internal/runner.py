@@ -19,6 +19,7 @@ from typing_extensions import TypeAliasType
 
 import asyncio
 import collections
+import contextlib
 import csv
 import gc
 import dataclasses
@@ -42,6 +43,7 @@ import unittest.result
 import unittest.signals
 import warnings
 
+from . import capture
 from . import cov
 from . import cpython_state
 from . import console
@@ -56,6 +58,7 @@ from .pytest_compat import fixtures as pytest_fixtures
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Iterator
     from collections.abc import Callable, Mapping, Sequence
+    from contextlib import AbstractContextManager
 
 _ConnArgs = TypeAliasType("_ConnArgs", dict[str, Any])
 
@@ -74,6 +77,40 @@ py_hash_secret: bytes = cpython_state.get_py_hash_secret()
 py_random_seed: bytes = random.SystemRandom().randbytes(8)
 
 faulthandler.enable(file=sys.stderr, all_threads=True)
+
+
+@contextlib.contextmanager
+def recorded_warnings(
+    *,
+    enabled: bool = True,
+) -> Iterator[list[warnings.WarningMessage]]:
+    """Record warnings emitted by a runner phase.
+
+    Warnings emitted during collection and parent-side fixture
+    setup/teardown are recorded (when warning capture is enabled) and
+    added to the result's warning summary instead of interleaving
+    with the progress output.
+    """
+    if not enabled:
+        yield []
+        return
+    with warnings.catch_warnings(record=True) as ww:
+        warnings.resetwarnings()
+        warnings.simplefilter("default")
+        yield ww
+
+
+class _SessionPhaseHolder:
+    """Stands in for a test when attributing session-phase warnings."""
+
+    def __init__(self, description: str) -> None:
+        self._description = description
+
+    def id(self) -> str:
+        return self._description
+
+    def __str__(self) -> str:
+        return self._description
 
 
 def teardown_suite() -> None:
@@ -160,7 +197,16 @@ class StreamingTestSuite(unittest.TestSuite):
                 category=DeprecationWarning,
             )
 
-            result = self._run(test, result)
+            cap = capture.instance()
+            if cap is not None:
+                cap.start()
+            try:
+                result = self._run(test, result)
+            finally:
+                if cap is not None:
+                    out, err = cap.stop()
+                    if out or err:
+                        result.record_test_output(test, out, err)
 
             if ww:
                 for wmsg in ww:
@@ -342,6 +388,7 @@ class ChannelingTestResultMeta(type):
             "addSubTest",
             "addWarning",
             "record_test_stats",
+            "record_test_output",
             "annotate_test",
         ):
             dct[meth] = mcls.get_wrapper(meth)
@@ -382,6 +429,10 @@ class ChannelingTestResult(
 
         def record_test_stats(
             self, test: unittest.TestCase, stats: fixtures.StatsEntry
+        ) -> None: ...
+
+        def record_test_output(
+            self, test: unittest.TestCase, out: str, err: str
         ) -> None: ...
 
         def annotate_test(
@@ -831,7 +882,10 @@ class VerboseRenderer(BaseRenderer):
     def report_still_running(self, still_running: dict[str, float]) -> None:
         items = [f"{t} for {d:.02f}s" for t, d in still_running.items()]
         newline_join = "\n   "
-        console.echo(f"still running:\n  {newline_join.join(items)}")
+        console.echo(
+            f"still running:\n  {newline_join.join(items)}",
+            file=self.stream,
+        )
 
 
 class MultiLineRenderer(BaseRenderer):
@@ -865,7 +919,6 @@ class MultiLineRenderer(BaseRenderer):
             collections.defaultdict(str)
         )
         self.last_lines = -1
-        self.max_lines = 0
         self.max_label_lines_rendered: collections.defaultdict[str, int] = (
             collections.defaultdict(int)
         )
@@ -1044,10 +1097,6 @@ class MultiLineRenderer(BaseRenderer):
             f"Progress: {self.completed_tests}/{self.total_tests} tests."
         )
 
-        if self.max_lines > len(lines):
-            for _ in range(self.max_lines - len(lines)):
-                lines.insert(0, " " * cols)
-
         if not last_render:
             # If it's not the last test, check if our render buffer
             # requires more rows than currently visible.
@@ -1063,18 +1112,27 @@ class MultiLineRenderer(BaseRenderer):
                 lines = lines[len(lines) + 1 - rows :]
                 lines[0] = "^" * cols
 
+        # When this frame is shorter than the previous one (the final
+        # render drops the failed/running lists), erase the leftover
+        # lines below instead of padding the frame, which would bake a
+        # permanent blank block into the scrollback.
+        erase_below = "\033[0J" if len(lines) < self.last_lines else ""
+
         # Hide cursor.
         print("\033[?25l", end="", flush=True, file=self.stream)
         try:
             # Use `print` because we want to
             # precisely control when the output is flushed.
-            print(clear_cmd + "\n".join(lines), flush=False, file=self.stream)
+            print(
+                clear_cmd + "\n".join(lines) + erase_below,
+                flush=False,
+                file=self.stream,
+            )
         finally:
             # Show cursor.
             print("\033[?25h", end="", flush=True, file=self.stream)
 
         self.last_lines = len(lines)
-        self.max_lines = max(self.last_lines, self.max_lines)
 
 
 class ParallelTextTestResult(unittest.result.TestResult):
@@ -1101,6 +1159,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
         ] = collections.defaultdict(dict)
         self.errors: list[tuple[unittest.TestCase, results.OptExcInfo]] = []  # type: ignore [assignment]
         self.warnings: list[tuple[unittest.TestCase, str]] = []
+        self.test_output: dict[str, tuple[str, str]] = {}
         self.notImplemented: list[
             tuple[unittest.TestCase, results.OptExcInfo]
         ] = []
@@ -1164,6 +1223,16 @@ class ParallelTextTestResult(unittest.result.TestResult):
         self, test: unittest.TestCase, stats: fixtures.StatsEntry
     ) -> None:
         self.test_stats.append((test, stats))
+
+    def record_test_output(
+        self, test: unittest.TestCase, out: str, err: str
+    ) -> None:
+        self.test_output[test.id()] = (out, err)
+
+    def get_test_output(
+        self, test: unittest.TestCase
+    ) -> tuple[str, str] | None:
+        return self.test_output.get(test.id())
 
     def annotate_test(
         self, test: unittest.TestCase, annotations: dict[str, Any]
@@ -1331,12 +1400,14 @@ class ParallelTextTestRunner:
         shuffle: bool = False,
         options: Mapping[str, str] | None = None,
         distribute: str = "module",
+        capture_output: bool = True,
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
         self.distribute = distribute
         self.num_workers = num_workers
         self.verbosity = verbosity
         self.warnings = warnings
+        self.capture_output = capture_output
         self.failfast = failfast
         self.shuffle = shuffle
         self.output_format = output_format
@@ -1349,6 +1420,7 @@ class ParallelTextTestRunner:
         selected_shard: int,
         total_shards: int,
         running_times_log_file: TextIO | None,
+        collection_warnings: (Sequence[warnings.WarningMessage] | None) = None,
     ) -> results.TestResult:
         session_start = time.monotonic()
         cases = loader.get_test_cases([test])
@@ -1374,19 +1446,25 @@ class ParallelTextTestRunner:
         result: ParallelTextTestResult | None = None
         setup_stats: fixtures.Stats = []
         teardown_stats = []
+        dup_stream: TextIO | None = None
 
         try:
-            setup_stats = asyncio.run(
-                fixtures.setup_test_cases(
-                    [*cases],
-                    num_jobs=self.num_workers,
-                    ui=self.ui,
-                    options=self.options,
+            with self._recorded_warnings() as setup_warnings:
+                setup_stats = asyncio.run(
+                    fixtures.setup_test_cases(
+                        [*cases],
+                        num_jobs=self.num_workers,
+                        ui=self.ui,
+                        options=self.options,
+                    )
                 )
-            )
             setup_time_taken = time.monotonic() - session_start
 
             os.environ["GGT_TEST_SETUP_RESPONSIBLE"] = "runner"
+            # Workers receive this through the parameter queue's
+            # environment snapshot; the sequential suite reads it
+            # in-process.
+            os.environ[capture.ENV_VAR] = "1" if self.capture_output else "0"
 
             start = time.monotonic()
 
@@ -1412,8 +1490,30 @@ class ParallelTextTestRunner:
                     worker_init=worker_init,
                 )
 
+            result_stream = self.stream
+            if self.capture_output and self.num_workers <= 1:
+                # The sequential suite captures fds 1/2 in this very
+                # process while each test runs; the progress renderer
+                # must keep writing to the real terminal, so give it a
+                # duplicate of the stream's descriptor made before any
+                # redirection.
+                try:
+                    stream_fd = self.stream.fileno()
+                except (AttributeError, OSError, io.UnsupportedOperation):
+                    pass
+                else:
+                    dup_stream = os.fdopen(
+                        os.dup(stream_fd),
+                        "w",
+                        buffering=1,
+                        encoding=getattr(self.stream, "encoding", None)
+                        or "utf-8",
+                        errors="replace",
+                    )
+                    result_stream = dup_stream
+
             result = ParallelTextTestResult(
-                stream=self.stream,
+                stream=result_stream,
                 verbosity=self.verbosity,
                 catch_warnings=self.warnings,
                 failfast=self.failfast,
@@ -1423,17 +1523,33 @@ class ParallelTextTestRunner:
             )
             unittest.signals.registerResult(result)
 
+            collection_holder = _SessionPhaseHolder("test collection")
+            for wmsg in collection_warnings or ():
+                result.addWarning(collection_holder, wmsg)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
+
+            setup_holder = _SessionPhaseHolder("test session setup")
+            for wmsg in setup_warnings:
+                result.addWarning(setup_holder, wmsg)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
+
             self.ui.info("\nRunning tests\n\n")
             suite.run(result)
-            self.ui.info("\n")
+            if not isinstance(result.ren, MultiLineRenderer):
+                # Terminate the progress output (e.g. the simple
+                # renderer's dot line); the stacked renderer's frame
+                # is already newline-terminated.
+                self.ui.info("\n")
 
-            teardown_stats = asyncio.run(
-                fixtures.tear_down_test_cases(
-                    [*cases],
-                    num_jobs=self.num_workers,
-                    ui=self.ui,
+            with self._recorded_warnings() as teardown_warnings:
+                teardown_stats = asyncio.run(
+                    fixtures.tear_down_test_cases(
+                        [*cases],
+                        num_jobs=self.num_workers,
+                        ui=self.ui,
+                    )
                 )
-            )
+            teardown_holder = _SessionPhaseHolder("test session teardown")
+            for wmsg in teardown_warnings:
+                result.addWarning(teardown_holder, wmsg)  # type: ignore [arg-type]  # ty: ignore[invalid-argument-type]
 
             if running_times_log_file:
                 for test_obj, stat in (
@@ -1455,7 +1571,17 @@ class ParallelTextTestRunner:
             raise
 
         finally:
-            if self.verbosity == 1:
+            # Release capture resources (the sequential suite creates
+            # them in this process) before interpreter shutdown would
+            # report them as unclosed files.
+            capture.close()
+            if dup_stream is not None:
+                with contextlib.suppress(Exception):
+                    dup_stream.close()
+            if self.verbosity == 1 and not (
+                result is not None
+                and isinstance(result.ren, MultiLineRenderer)
+            ):
                 self._echo()
 
         return results.collect_result_data(
@@ -1465,6 +1591,11 @@ class ParallelTextTestRunner:
     def _echo(self, s: str = "", **kwargs: Any) -> None:
         if self.verbosity > 0:
             console.secho(s, file=self.stream, **kwargs)
+
+    def _recorded_warnings(
+        self,
+    ) -> AbstractContextManager[list[warnings.WarningMessage]]:
+        return recorded_warnings(enabled=self.warnings)
 
     def _sort_tests(
         self,

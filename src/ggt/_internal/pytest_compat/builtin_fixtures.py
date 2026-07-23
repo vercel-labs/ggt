@@ -25,6 +25,8 @@ import tempfile
 import warnings
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from .. import capture
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -321,7 +323,15 @@ class CaptureFixture:
         current = (sys.stdout, sys.stderr)
         sys.stdout, sys.stderr = self._old
         try:
-            yield
+            # The runner's global per-test fd capture (if on) must be
+            # suspended too, or the output would land there instead of
+            # the terminal.
+            global_capture = capture.active_instance()
+            if global_capture is not None:
+                with global_capture.suspended():
+                    yield
+            else:
+                yield
         finally:
             sys.stdout, sys.stderr = current
 

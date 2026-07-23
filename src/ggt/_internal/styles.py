@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, TextIO
 
 from typing_extensions import TypeAliasType
@@ -70,6 +71,33 @@ class ConsoleUI:
 
     def info(self, msg: str) -> None:
         self._echo(msg, fg="white")
+
+    @contextlib.contextmanager
+    def stage(self, msg: str) -> Iterator[None]:
+        """Show a status line for the duration of a run stage.
+
+        On a terminal the line is transient: shown while the stage
+        runs and erased once it completes.  Elsewhere (pipes, CI logs)
+        the message is printed permanently, exactly as given.
+        """
+        if self._verbosity <= 0:
+            yield
+            return
+        is_tty = getattr(self._stream, "isatty", lambda: False)()
+        if not is_tty:
+            self._echo(msg, fg="white")
+            yield
+            return
+        shown = msg.strip("\n")
+        self._echo(shown, fg="white")
+        try:
+            yield
+        finally:
+            # Erase just the status text (cursor left over its width,
+            # then clear to end of line), so that a partial line
+            # written before the stage is preserved.
+            if shown:
+                self._echo(f"\033[{len(shown)}D\033[K")
 
     def warning(self, msg: str) -> None:
         self._echo(msg, fg="yellow")

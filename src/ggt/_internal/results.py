@@ -57,11 +57,16 @@ class TestCase:
     error_message: str | None
     server_traceback: str | None
 
+    stdout: str | None = None
+    stderr: str | None = None
+
 
 def _collect_case_data(
     result: runner.ParallelTextTestResult,
     test: unittest.TestCase,
     err: Any,
+    *,
+    include_output: bool = False,
 ) -> TestCase:
     from . import runner  # noqa: PLC0415
 
@@ -86,6 +91,10 @@ def _collect_case_data(
     elif isinstance(err, str):
         error_message = err
 
+    stdout = stderr = None
+    if include_output and (output := result.get_test_output(test)):
+        stdout, stderr = (text or None for text in output)
+
     return TestCase(
         id=test.id(),
         description=result.getDescription(test),
@@ -93,6 +102,8 @@ def _collect_case_data(
         py_random_seed=py_random_seed,
         error_message=error_message,
         server_traceback=server_traceback,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -161,10 +172,17 @@ def collect_result_data(
         testsRun=r.testsRun,
         setup_time_taken=setup_time_taken,
         tests_time_taken=tests_time_taken,
-        failures=[_collect_case_data(r, t, e) for t, e in r.failures],
-        errors=[_collect_case_data(r, t, e) for t, e in r.errors],
+        failures=[
+            _collect_case_data(r, t, e, include_output=True)
+            for t, e in r.failures
+        ],
+        errors=[
+            _collect_case_data(r, t, e, include_output=True)
+            for t, e in r.errors
+        ],
         unexpected_successes=[
-            _collect_case_data(r, t, None) for t in r.unexpectedSuccesses
+            _collect_case_data(r, t, None, include_output=True)
+            for t in r.unexpectedSuccesses
         ],
         warnings=[_collect_case_data(r, t, e) for t, e in r.warnings],
         skipped=[_collect_case_data(r, t, e) for t, e in r.skipped],
@@ -226,6 +244,12 @@ def _print_case_result(
         if case.server_traceback:
             _echo(file, "Test Traceback:", fg="red", bold=True)
         _echo(file, case.error_message)
+
+    for label, text in (("stdout", case.stdout), ("stderr", case.stderr)):
+        if text:
+            _fill(file, "-", fg=fg)
+            _echo(file, f"Captured {label}:", fg=fg, bold=True)
+            _echo(file, text.rstrip("\n"))
 
 
 def render_result(file: TextIO, result: TestResult) -> None:
