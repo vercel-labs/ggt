@@ -61,6 +61,7 @@ import multiprocessing.forkserver
 import os
 import pathlib
 import sys
+import warnings
 
 ENV_MODULES = "GGT_PRELOAD_MODULES"
 CACHE_DIR = ".ggt_cache"
@@ -275,12 +276,17 @@ def _preload() -> None:
     if pytest_compat.is_enabled():
         pytest_compat.install_assertion_rewriting()
 
-    for entry in modules:
-        try:
-            name, _origin = entry
-            importlib.import_module(str(name))
-        except BaseException:  # noqa: S112
-            continue
+    # These imports are speculative warm-up work, not part of the test run.
+    # Do not leak dependency warnings directly from the fork server; modules
+    # imported normally by a worker retain the process's usual warning policy.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for entry in modules:
+            try:
+                name, _origin = entry
+                importlib.import_module(str(name))
+            except BaseException:  # noqa: S112
+                continue
 
     # Validate origins in a post-pass: a mismatched module must be
     # evicted so workers import the right file from scratch instead

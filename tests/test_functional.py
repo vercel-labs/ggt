@@ -958,6 +958,36 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proc.returncode, 0, stderr.decode())
         self.assertEqual(stdout.decode().strip(), "ok")
 
+    async def test_preload_replay_suppresses_import_warnings(self) -> None:
+        warning_module = self.write(
+            self.project / "warn_on_import.py",
+            "import warnings\n"
+            "warnings.warn('preload import warning', UserWarning)\n",
+        )
+        state = {
+            "modules": [["warn_on_import", str(warning_module)]],
+        }
+        script = self.write(
+            self.project / "probe.py",
+            "import warnings\n"
+            "warnings.simplefilter('always')\n"
+            "import ggt._internal.preload\n"
+            "warnings.warn('ordinary warning', UserWarning)\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(GGT_PRELOAD_MODULES=json.dumps(state)),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout, b"")
+        self.assertNotIn("preload import warning", stderr.decode())
+        self.assertIn("ordinary warning", stderr.decode())
+
     async def test_preload_cache_from_foreign_environment_is_ignored(
         self,
     ) -> None:
