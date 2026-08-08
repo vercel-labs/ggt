@@ -39,7 +39,7 @@ import unittest
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from ..decorators import LOCAL_FIXTURE_ATTR
-from . import builtin_fixtures, discovery
+from . import builtin_fixtures, discovery, outcomes
 
 # Imported for their side effect of contributing to the builtin
 # fixture registry.
@@ -280,12 +280,22 @@ def _collect_module_fixtures(mod: types.ModuleType) -> dict[str, FixtureDef]:
 
     result: dict[str, FixtureDef] = {}
     for attr_name, obj in [*vars(mod).items()]:
-        fdef = _make_fixture_def(
-            attr_name,
-            obj,
-            source=source,
-            needs_instance=False,
-        )
+        try:
+            fdef = _make_fixture_def(
+                attr_name,
+                obj,
+                source=source,
+                needs_instance=False,
+            )
+        except FixtureError:
+            # Installed/declarative plugins can expose fixtures for pytest
+            # features ggt does not implement.  An unrelated unsupported
+            # plugin fixture must not prevent its supported fixtures from
+            # being registered (pytest-asyncio has a package-scoped runner,
+            # for example).
+            if discovery.is_fixture_plugin(mod):
+                continue
+            raise
         if fdef is not None:
             result[fdef.name] = fdef
 
@@ -345,25 +355,32 @@ def _conftest_modules(mod: types.ModuleType) -> list[types.ModuleType]:
 
     dirname = os.path.dirname(origin)
     cached = _conftest_chain_cache.get(dirname)
-    if cached is not None:
-        return cached
+    if cached is None:
+        cached = []
+        for directory in discovery.conftest_directories(pathlib.Path(origin)):
+            conftest = directory / "conftest.py"
+            if conftest.is_file():
+                cached.append(discovery.import_conftest(conftest))
+        _conftest_chain_cache[dirname] = cached
 
-    result: list[types.ModuleType] = []
-    for directory in discovery.conftest_directories(pathlib.Path(origin)):
-        conftest = directory / "conftest.py"
-        if conftest.is_file():
-            result.append(discovery.import_conftest(conftest))
+    result = [*cached]
 
     plugins: list[types.ModuleType] = []
     seen: set[str] = set()
-    for conftest_mod in result:
-        for plugin in discovery.plugin_modules(conftest_mod):
+    # pytest_plugins is valid in test modules as well as conftests.
+    # Installed pytest11 entry points are pytest's other fixture-plugin
+    # source (for example, respx's respx_mock fixture).
+    for declaring_mod in (mod, *result):
+        for plugin in discovery.plugin_modules(declaring_mod):
             if plugin.__name__ not in seen:
                 seen.add(plugin.__name__)
                 plugins.append(plugin)
+    for plugin in discovery.entrypoint_plugin_modules():
+        if plugin.__name__ not in seen:
+            seen.add(plugin.__name__)
+            plugins.append(plugin)
     result.extend(plugins)
 
-    _conftest_chain_cache[dirname] = result
     return result
 
 
@@ -1002,9 +1019,12 @@ class TestExecution:
             args = (self.instance,)
 
         if inspect.isgeneratorfunction(func):
-            gen = func(*args, **kwargs)
-            assert isinstance(gen, types.GeneratorType)
-            value = next(gen)
+            try:
+                gen = func(*args, **kwargs)
+                assert isinstance(gen, types.GeneratorType)
+                value = next(gen)
+            except BaseException as e:
+                outcomes.raise_translated(e)
 
             def finalizer() -> None:
                 try:
@@ -1020,7 +1040,10 @@ class TestExecution:
             _engine.add_finalizer(fdef.scope, scope_key, finalizer)
             return value
 
-        return func(*args, **kwargs)
+        try:
+            return func(*args, **kwargs)
+        except BaseException as e:
+            outcomes.raise_translated(e)
 
     async def _instantiate_async(
         self,
@@ -1036,7 +1059,10 @@ class TestExecution:
         if inspect.isasyncgenfunction(func):
             agen = func(*args, **kwargs)
             assert isinstance(agen, types.AsyncGeneratorType)
-            value = await anext(agen)
+            try:
+                value = await anext(agen)
+            except BaseException as e:
+                outcomes.raise_translated(e)
 
             async def finalizer() -> None:
                 try:
@@ -1055,7 +1081,10 @@ class TestExecution:
         if inspect.iscoroutinefunction(func):
             coro = func(*args, **kwargs)
             assert inspect.isawaitable(coro)
-            return await coro
+            try:
+                return await coro
+            except BaseException as e:
+                outcomes.raise_translated(e)
 
         # A synchronous fixture requested from an async context.
         return self._instantiate(fdef, scope_key, kwargs)

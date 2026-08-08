@@ -25,7 +25,15 @@ import unittest
 from typing import TYPE_CHECKING, Any, cast
 
 from .. import marks as ggt_marks
-from . import anyio_bridge, collect, hypothesis_bridge, inicfg, marks, shared
+from . import (
+    anyio_bridge,
+    collect,
+    hypothesis_bridge,
+    inicfg,
+    marks,
+    outcomes,
+    shared,
+)
 from . import fixtures as fixture_engine
 
 if TYPE_CHECKING:
@@ -97,14 +105,7 @@ def _translate_outcome(e: BaseException) -> BaseException | None:
     attributes every OutcomeException carries) so that pytest is never
     imported here.
     """
-    cls = type(e)
-    if not (hasattr(e, "msg") and hasattr(e, "pytrace")):
-        return None
-    if cls.__name__ == "Skipped":
-        return unittest.SkipTest(str(e) or "skipped")
-    if cls.__name__ == "Failed":
-        return AssertionError(str(e) or "failed")
-    return None
+    return outcomes.translate(e)
 
 
 def _call_hook(hook: Callable[..., object], *args: object) -> None:

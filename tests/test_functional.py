@@ -417,7 +417,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
                 "simple",
             ),
         )
-        for jobs, result in zip(["1", "2"], job_results):
+        for jobs, result in zip(["1", "2"], job_results, strict=True):
             with self.subTest(jobs=jobs):
                 self.skip_if_multiprocessing_blocked(result)
                 await self.assert_success(result)
@@ -441,6 +441,47 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.assert_failure(stopped)
         self.assertIn("tests ran: 1", stopped.output)
+
+    async def test_pytest_compat_entrypoint_plugin_fixtures(self) -> None:
+        self.use_fixture("basic")
+        plugin = self.write(
+            self.project / "entrypoint_plugin.py",
+            """\
+import pytest
+
+@pytest.fixture
+def installed_plugin_value():
+    return "installed-plugin"
+""",
+        )
+        self.write(
+            self.tests_dir / "test_entrypoint_plugin.py",
+            """\
+def test_installed_plugin_fixture(installed_plugin_value):
+    assert installed_plugin_value == "installed-plugin"
+""",
+        )
+
+        # A minimal installed distribution with a pytest11 entry point.
+        dist_info = self.project / "installed_plugin-1.0.dist-info"
+        self.write(
+            dist_info / "entry_points.txt",
+            "[pytest11]\ninstalled-plugin = entrypoint_plugin\n",
+        )
+        self.write(
+            dist_info / "METADATA",
+            "Name: installed-plugin\nVersion: 1.0\n",
+        )
+        self.assertTrue(plugin.is_file())
+
+        result = await self.run_ggt(
+            "tests/test_entrypoint_plugin.py",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 1", result.output)
 
     async def test_repeat_named_tests_are_ordered_after_first_runs(
         self,
@@ -1773,7 +1814,9 @@ addopts = "'unterminated"
                 if jobs != "-j1":
                     self.skip_if_multiprocessing_blocked(result)
                 await self.assert_success(result)
-                self.assertIn("tests ran: 4", result.output)
+                self.assertIn("tests ran: 7", result.output)
+                self.assertIn("skipped: 1", result.output)
+                self.assertIn("expected failures: 1", result.output)
 
     async def test_pytest_compat_ignore_collect_hook(self) -> None:
         # conftest pytest_ignore_collect hooks prune files and whole

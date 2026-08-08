@@ -36,6 +36,7 @@ import os
 import pathlib
 import pickle  # noqa: S403
 import tempfile
+import unittest
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -44,7 +45,6 @@ from . import fixtures as fixture_engine
 
 if TYPE_CHECKING:
     import types
-    import unittest
     from collections.abc import Mapping, Sequence
 
 ENV_DISABLE = "GGT_PYTEST_SHARED_FIXTURES"
@@ -104,6 +104,10 @@ class SharedFixtureAdapter:
 
         try:
             self._value = execution.resolve_def(self._fdef, index)
+        except unittest.SkipTest:
+            # Retrying in workers attributes the skip to each test that
+            # actually depends on this shared fixture.
+            return
         except Exception as e:
             # Let the tests run the fixture themselves so that the
             # error is attributed to each affected test.
