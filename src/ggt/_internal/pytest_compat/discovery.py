@@ -31,11 +31,13 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import importlib
+import importlib.metadata
 import importlib.util
 import inspect
 import os
 import pathlib
 import sys
+import types
 import unittest
 import warnings
 from typing import TYPE_CHECKING, cast
@@ -44,7 +46,6 @@ from .. import imputil
 from . import collect, inicfg, rewrite
 
 if TYPE_CHECKING:
-    import types
     from collections.abc import Callable, Iterator
 
 TEST_FILE_PATTERNS = collect.TEST_FILE_PATTERNS
@@ -151,6 +152,39 @@ def import_test_file(file: pathlib.Path) -> types.ModuleType:
 
 
 _plugin_cache: dict[str, types.ModuleType] = {}
+_entrypoint_plugins: list[types.ModuleType] | None = None
+_fixture_plugin_names: set[str] = set()
+
+
+def is_fixture_plugin(mod: types.ModuleType) -> bool:
+    return mod.__name__ in _fixture_plugin_names
+
+
+def entrypoint_plugin_modules() -> list[types.ModuleType]:
+    """Fixture-contributing plugins installed through pytest11 entry points."""
+    global _entrypoint_plugins  # noqa: PLW0603
+    if _entrypoint_plugins is not None:
+        return _entrypoint_plugins
+
+    result: list[types.ModuleType] = []
+    entries = importlib.metadata.entry_points(group="pytest11")
+    for entry in sorted(entries, key=lambda item: (item.name, item.value)):
+        try:
+            plugin = entry.load()
+        except ImportError as e:
+            warnings.warn(
+                f"cannot import installed pytest plugin {entry.name!r} "
+                f"({entry.value}): {e}",
+                stacklevel=2,
+            )
+            continue
+        if not isinstance(plugin, types.ModuleType):
+            continue
+        _fixture_plugin_names.add(plugin.__name__)
+        result.append(plugin)
+        _collect_plugins(plugin, result, seen={plugin.__name__})
+    _entrypoint_plugins = result
+    return result
 
 
 def plugin_modules(mod: types.ModuleType) -> list[types.ModuleType]:
@@ -207,6 +241,7 @@ def _collect_plugins(
             _warn_ignored_hooks(plugin, pathlib.Path(plugin_origin or name))
             _plugin_cache[name] = plugin
         result.append(plugin)
+        _fixture_plugin_names.add(plugin.__name__)
         _collect_plugins(plugin, result, seen)
 
 

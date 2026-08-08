@@ -333,9 +333,10 @@ Not supported (yet)
 The pytest plugin/hook system and third-party plugins (pytest-asyncio,
 pytest-mock, ...) — hooks defined in conftest.py files or plugin
 modules are ignored with a warning.  Fixture-only plugin modules
-declared via a conftest's ``pytest_plugins`` *are* supported
-(transitively): they contribute their fixtures at lower lookup
-priority than any conftest.  ``pytest_generate_tests``; indirect
+declared via ``pytest_plugins`` (in a conftest or test module) and
+installed ``pytest11`` entry points *are* supported (transitively):
+they contribute their fixtures at lower lookup priority than any
+conftest.  ``pytest_generate_tests``; indirect
 parametrization;
 dynamically requested parametrized fixtures
 (``request.getfixturevalue()`` of a parametrized fixture); package-
