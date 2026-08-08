@@ -340,7 +340,18 @@ def main(argv: list[str] | None = None) -> None:
     os.environ.pop("GGT_PARALLEL", None)
 
     parser = build_parser()
-    args = parser.parse_args(argv)
+    cli_args = list(sys.argv[1:] if argv is None else argv)
+    explicit_args = (
+        cli_args[: cli_args.index("--")] if "--" in cli_args else cli_args
+    )
+    if "--no-pytest" not in explicit_args and pytest_compat.pytest_available():
+        try:
+            ini = pytest_compat.load_ini_config()
+        except ValueError as e:
+            parser.error(f"invalid pytest addopts: {e}")
+        cli_args = [*ini.addopts, *cli_args]
+
+    args = parser.parse_args(cli_args)
     args.output_format = runner.OutputFormat(args.output_format)
     args.running_times_log_file = _open_running_times_log(
         args.running_times_log_file
