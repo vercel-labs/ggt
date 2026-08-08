@@ -4,11 +4,14 @@
 
 import os
 
+import pytest
+
 
 def check_usefixtures_applied():
     assert os.environ.get("GGT_INI_USEFIXTURES") == "on"
 
 
+@pytest.mark.omitted
 def check_asserts_are_rewritten():
     assert True
 

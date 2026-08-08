@@ -6,10 +6,11 @@
 
 Reads ``[tool.pytest.ini_options]`` from ``pyproject.toml`` or the
 ``[pytest]`` section of ``pytest.ini``, walking up from the current
-directory.  Only collection-affecting options are honored:
+directory.  Collection-affecting options are honored:
 ``python_files``, ``python_classes``, ``python_functions``,
-``testpaths`` and ``usefixtures``; everything else (notably
-``addopts``) is ignored.
+``testpaths`` and ``usefixtures``.  ``addopts`` is also exposed to the
+CLI so that ggt-compatible command-line defaults can be configured.
+Everything else is ignored.
 
 The parent process loads the config once and exports it through the
 ``GGT_PYTEST_INI`` environment variable so that workers — which re-run
@@ -23,6 +24,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import shlex
 import tomllib
 
 ENV_KEY = "GGT_PYTEST_INI"
@@ -43,6 +45,7 @@ class IniConfig:
     python_functions: tuple[str, ...] = ()
     testpaths: tuple[str, ...] = ()
     usefixtures: tuple[str, ...] = ()
+    addopts: tuple[str, ...] = ()
     # The directory containing the configuration file (or the initial
     # lookup directory when none was found).  Bounds the conftest.py
     # search, like pytest's rootdir.
@@ -70,10 +73,19 @@ def _normalize(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _normalize_addopts(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(shlex.split(value))
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    return ()
+
+
 def _from_mapping(data: dict[str, object]) -> IniConfig:
     rootdir = data.get("rootdir")
     return IniConfig(
         rootdir=str(rootdir) if isinstance(rootdir, str) else "",
+        addopts=_normalize_addopts(data.get("addopts")),
         **{key: _normalize(data.get(key)) for key in _SUPPORTED},
     )
 

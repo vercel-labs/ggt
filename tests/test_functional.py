@@ -1649,6 +1649,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_success(listed)
         self.assertIn("check_usefixtures_applied", listed.stdout)
         self.assertIn("CheckGroup::check_method", listed.stdout)
+        self.assertNotIn("check_asserts_are_rewritten", listed.stdout)
         self.assertNotIn("test_not_collected", listed.stdout)
         self.assertNotIn("check_never", listed.stdout)
 
@@ -1659,7 +1660,87 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             cwd=project,
         )
         await self.assert_success(result)
-        self.assertIn("tests ran: 3", result.output)
+        self.assertIn("tests ran: 2", result.output)
+
+        overridden = await self.run_ggt(
+            "-m",
+            "omitted",
+            "-j1",
+            "--output-format",
+            "simple",
+            cwd=project,
+        )
+        await self.assert_success(overridden)
+        self.assertIn("tests ran: 1", overridden.output)
+
+    async def test_pytest_compat_addopts_from_pytest_ini(self) -> None:
+        self.write(
+            self.project / "pytest.ini",
+            '[pytest]\naddopts = -m "not slow" --output-format silent\n',
+        )
+        self.write(
+            self.tests_dir / "test_addopts.py",
+            """\
+import pytest
+
+
+def test_fast():
+    pass
+
+
+@pytest.mark.slow
+def test_slow():
+    pass
+""",
+        )
+
+        result = await self.run_ggt("--list", "--output-format", "simple")
+        await self.assert_success(result)
+        self.assertIn("test_fast", result.stdout)
+        self.assertNotIn("test_slow", result.stdout)
+
+    async def test_pytest_compat_addopts_errors_and_disable(self) -> None:
+        self.use_fixture("basic")
+        self.write(
+            self.project / "pyproject.toml",
+            """\
+[project]
+name = "addopts-errors"
+
+[tool.pytest.ini_options]
+addopts = ["--pytest-only-option"]
+""",
+        )
+
+        invalid = await self.run_ggt("tests/test_basic.py")
+        await self.assert_failure(invalid)
+        self.assertIn(
+            "unrecognized arguments: --pytest-only-option", invalid.stderr
+        )
+
+        disabled = await self.run_ggt(
+            "tests/test_basic.py",
+            "--no-pytest",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(disabled)
+
+        self.write(
+            self.project / "pyproject.toml",
+            """\
+[project]
+name = "addopts-errors"
+
+[tool.pytest.ini_options]
+addopts = "'unterminated"
+""",
+        )
+        malformed = await self.run_ggt("tests/test_basic.py")
+        await self.assert_failure(malformed)
+        self.assertIn("invalid pytest addopts", malformed.stderr)
+        self.assertIn("No closing quotation", malformed.stderr)
 
     async def test_pytest_compat_conftest_beyond_package_root(self) -> None:
         # Fixtures from a conftest.py above a non-package directory
