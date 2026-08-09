@@ -8,8 +8,9 @@ Reads ``[tool.pytest.ini_options]`` from ``pyproject.toml`` or the
 ``[pytest]`` section of ``pytest.ini``, walking up from the current
 directory.  Collection-affecting options are honored:
 ``python_files``, ``python_classes``, ``python_functions``,
-``testpaths`` and ``usefixtures``.  ``addopts`` is also exposed to the
-CLI so that ggt-compatible command-line defaults can be configured.
+``testpaths``, ``pythonpath`` and ``usefixtures``.  ``addopts`` is also
+exposed to the CLI so that ggt-compatible command-line defaults can be
+configured.
 Everything else is ignored.
 
 The parent process loads the config once and exports it through the
@@ -22,10 +23,12 @@ from __future__ import annotations
 import configparser
 import dataclasses
 import functools
+import importlib
 import json
 import os
 import pathlib
 import shlex
+import sys
 import tomllib
 
 ENV_KEY = "GGT_PYTEST_INI"
@@ -35,6 +38,7 @@ _SUPPORTED = (
     "python_classes",
     "python_functions",
     "testpaths",
+    "pythonpath",
     "usefixtures",
 )
 
@@ -45,6 +49,7 @@ class IniConfig:
     python_classes: tuple[str, ...] = ()
     python_functions: tuple[str, ...] = ()
     testpaths: tuple[str, ...] = ()
+    pythonpath: tuple[str, ...] = ()
     usefixtures: tuple[str, ...] = ()
     addopts: tuple[str, ...] = ()
     # The directory containing the configuration file (or the initial
@@ -180,6 +185,27 @@ def _from_mapping(data: dict[str, object]) -> IniConfig:
     )
 
 
+def _with_rootdir(config: IniConfig, rootdir: pathlib.Path) -> IniConfig:
+    """Resolve path-valued options relative to the configuration file."""
+    return dataclasses.replace(
+        config,
+        rootdir=str(rootdir),
+        pythonpath=tuple(
+            str((rootdir / entry).resolve()) for entry in config.pythonpath
+        ),
+    )
+
+
+def apply_pythonpath(config: IniConfig) -> None:
+    """Prepend configured import paths with pytest-compatible ordering."""
+    for entry in reversed(config.pythonpath):
+        while entry in sys.path:
+            sys.path.remove(entry)
+        sys.path.insert(0, entry)
+    if config.pythonpath:
+        importlib.invalidate_caches()
+
+
 def load_from(start: pathlib.Path) -> IniConfig:
     """Locate and parse the pytest configuration for *start*.
 
@@ -197,9 +223,8 @@ def load_from(start: pathlib.Path) -> IniConfig:
             except configparser.Error:
                 return IniConfig(rootdir=str(directory))
             if parser.has_section("pytest"):
-                return dataclasses.replace(
-                    _from_mapping(dict(parser.items("pytest"))),
-                    rootdir=str(directory),
+                return _with_rootdir(
+                    _from_mapping(dict(parser.items("pytest"))), directory
                 )
             return IniConfig(rootdir=str(directory))
 
@@ -212,9 +237,7 @@ def load_from(start: pathlib.Path) -> IniConfig:
                 continue
             ini = data.get("tool", {}).get("pytest", {}).get("ini_options")
             if isinstance(ini, dict):
-                return dataclasses.replace(
-                    _from_mapping(ini), rootdir=str(directory)
-                )
+                return _with_rootdir(_from_mapping(ini), directory)
 
     return IniConfig(rootdir=str(start))
 
@@ -223,6 +246,7 @@ def initialize(start: pathlib.Path) -> IniConfig:
     """Load the config and export it to workers (parent process)."""
     global _current  # noqa: PLW0603
     _current = load_from(start)
+    apply_pythonpath(_current)
     os.environ[ENV_KEY] = json.dumps(_current.as_dict())
     return _current
 

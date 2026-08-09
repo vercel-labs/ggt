@@ -88,3 +88,6 @@ def worker_init() -> None:
     """
     if is_enabled():
         install_assertion_rewriting()
+        from . import inicfg  # noqa: PLC0415
+
+        inicfg.apply_pythonpath(inicfg.current())
