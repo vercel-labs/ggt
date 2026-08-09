@@ -258,9 +258,12 @@ What works
   ``pytest.ini`` — ``python_files``, ``python_classes``,
   ``python_functions``, ``testpaths`` and ``usefixtures``.  ``addopts``
   is also supported for ggt command-line options; options written on
-  the command line take precedence.  Pytest-only and plugin-provided
-  options are rejected as unknown arguments.  Other ini options are
-  ignored.
+  the command line take precedence.  Pytest capture modes are mapped
+  to ggt's capture toggle (``fd``, ``sys`` and ``tee-sys`` enable it;
+  ``no`` disables it), and ``--no-header`` is ignored because ggt has
+  no pytest-style header.  Other unsupported pytest and installed-plugin
+  options in ``addopts`` are ignored.  Options passed directly to ggt
+  remain strictly validated.  Other ini options are ignored.
 - **Assertion introspection**: plain ``assert`` statements are rewritten
   with pytest's own assertion rewriter, producing rich failure messages
   (``assert [1, 2] == [1, 3] ... At index 1 diff: 2 != 3``).  Rewritten

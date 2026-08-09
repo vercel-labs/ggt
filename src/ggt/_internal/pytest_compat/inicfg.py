@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import configparser
 import dataclasses
+import functools
 import json
 import os
 import pathlib
@@ -73,11 +74,100 @@ def _normalize(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _translate_addopts(args: tuple[str, ...]) -> tuple[str, ...]:
+    """Translate pytest presentation options to ggt equivalents."""
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--no-header":
+            # ggt has no pytest-style header to suppress.
+            index += 1
+            continue
+
+        capture_mode: str | None = None
+        if arg.startswith("--capture="):
+            capture_mode = arg.partition("=")[2]
+        elif arg == "--capture" and index + 1 < len(args):
+            capture_mode = args[index + 1]
+            index += 1
+
+        if capture_mode is not None:
+            if capture_mode in {"fd", "sys", "tee-sys"}:
+                result.append("--capture")
+            elif capture_mode == "no":
+                result.append("--no-capture")
+            else:
+                raise ValueError(
+                    f"unsupported pytest capture mode: {capture_mode!r}"
+                )
+            index += 1
+            continue
+
+        result.append(arg)
+        index += 1
+
+    return tuple(result)
+
+
+@functools.cache
+def _pytest_option_nargs() -> dict[str, object]:
+    """Argument counts for pytest core and installed-plugin options."""
+    try:
+        from _pytest.config import get_config  # noqa: PLC0415, PLC2701
+
+        config = get_config()
+        config.pluginmanager.load_setuptools_entrypoints("pytest11")
+    except Exception:
+        return {}
+
+    result: dict[str, object] = {}
+    for group in config._parser._groups:
+        for option in group.options:
+            attrs = option.attrs()
+            for name in option.names():
+                result[name] = attrs.get("nargs")
+    return result
+
+
+def filter_addopts(
+    args: tuple[str, ...],
+    *,
+    supported_options: set[str],
+) -> tuple[str, ...]:
+    """Drop pytest options that ggt's command line does not support."""
+    pytest_nargs = _pytest_option_nargs()
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        option = arg.partition("=")[0] if arg.startswith("-") else None
+        if option is None or option in supported_options:
+            result.append(arg)
+            index += 1
+            continue
+
+        nargs = pytest_nargs.get(option, 0)
+        index += 1
+        if "=" in arg or nargs == 0:
+            continue
+        if nargs is None or nargs == "?":
+            if index < len(args) and not args[index].startswith("-"):
+                index += 1
+        elif isinstance(nargs, int):
+            index = min(index + nargs, len(args))
+        elif nargs in {"+", "*"}:
+            while index < len(args) and not args[index].startswith("-"):
+                index += 1
+
+    return tuple(result)
+
+
 def _normalize_addopts(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
-        return tuple(shlex.split(value))
+        return _translate_addopts(tuple(shlex.split(value)))
     if isinstance(value, (list, tuple)):
-        return tuple(str(item) for item in value)
+        return _translate_addopts(tuple(str(item) for item in value))
     return ()
 
 

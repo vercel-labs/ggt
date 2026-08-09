@@ -1740,7 +1740,45 @@ def test_slow():
         self.assertIn("test_fast", result.stdout)
         self.assertNotIn("test_slow", result.stdout)
 
-    async def test_pytest_compat_addopts_errors_and_disable(self) -> None:
+    async def test_pytest_compat_translates_presentation_addopts(self) -> None:
+        self.write(
+            self.project / "pyproject.toml",
+            """\
+[project]
+name = "pytest-presentation-addopts"
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+""",
+        )
+        self.write(
+            self.tests_dir / "test_capture.py",
+            """\
+def test_output():
+    print("PRESENTATION-ADDOPTS-MARKER")
+""",
+        )
+
+        captured = await self.run_ggt(
+            "tests/test_capture.py",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(captured)
+        self.assertNotIn("PRESENTATION-ADDOPTS-MARKER", captured.output)
+
+        explicit = await self.run_ggt(
+            "tests/test_capture.py",
+            "-j1",
+            "--no-capture",
+            "--output-format",
+            "simple",
+        )
+        await self.assert_success(explicit)
+        self.assertIn("PRESENTATION-ADDOPTS-MARKER", explicit.output)
+
+    async def test_pytest_compat_unsupported_addopts_and_disable(self) -> None:
         self.use_fixture("basic")
         self.write(
             self.project / "pyproject.toml",
@@ -1749,15 +1787,21 @@ def test_slow():
 name = "addopts-errors"
 
 [tool.pytest.ini_options]
-addopts = ["--pytest-only-option"]
+addopts = ["--no-header", "--tb", "short", "--pytest-only-option"]
 """,
         )
 
-        invalid = await self.run_ggt("tests/test_basic.py")
-        await self.assert_failure(invalid)
-        self.assertIn(
-            "unrecognized arguments: --pytest-only-option", invalid.stderr
+        ignored = await self.run_ggt(
+            "tests/test_basic.py", "-j1", "--output-format", "simple"
         )
+        await self.assert_success(ignored)
+        self.assertIn("tests ran: 5", ignored.output)
+
+        explicit = await self.run_ggt(
+            "tests/test_basic.py", "--pytest-only-option"
+        )
+        await self.assert_failure(explicit)
+        self.assertIn("unrecognized arguments", explicit.stderr)
 
         disabled = await self.run_ggt(
             "tests/test_basic.py",
