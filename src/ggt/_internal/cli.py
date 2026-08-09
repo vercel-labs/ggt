@@ -349,7 +349,12 @@ def main(argv: list[str] | None = None) -> None:
             ini = pytest_compat.load_ini_config()
         except ValueError as e:
             parser.error(f"invalid pytest addopts: {e}")
-        cli_args = [*ini.addopts, *cli_args]
+        supported_options = set(parser._option_string_actions)
+        addopts = pytest_compat.inicfg.filter_addopts(
+            ini.addopts,
+            supported_options=supported_options,
+        )
+        cli_args = [*addopts, *cli_args]
 
     args = parser.parse_args(cli_args)
     args.output_format = runner.OutputFormat(args.output_format)
