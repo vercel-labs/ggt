@@ -1714,6 +1714,44 @@ def test_installed_plugin_fixture(installed_plugin_value):
         await self.assert_success(overridden)
         self.assertIn("tests ran: 1", overridden.output)
 
+    async def test_pytest_compat_pythonpath_remains_available(self) -> None:
+        self.write(
+            self.project / "pyproject.toml",
+            """\
+[project]
+name = "pytest-pythonpath"
+
+[tool.pytest.ini_options]
+pythonpath = ["support"]
+""",
+        )
+        self.write(self.project / "support" / "delayed.py", "VALUE = 42\n")
+        self.write(
+            self.tests_dir / "test_pythonpath.py",
+            """\
+import importlib
+import sys
+
+
+def test_import_after_collection():
+    sys.modules.pop("delayed", None)
+    assert importlib.import_module("delayed").VALUE == 42
+""",
+        )
+
+        for jobs in ("-j1", "-j2"):
+            with self.subTest(jobs=jobs):
+                result = await self.run_ggt(
+                    "tests/test_pythonpath.py",
+                    jobs,
+                    "--output-format",
+                    "simple",
+                )
+                if jobs != "-j1":
+                    self.skip_if_multiprocessing_blocked(result)
+                await self.assert_success(result)
+                self.assertIn("tests ran: 1", result.output)
+
     async def test_pytest_compat_addopts_from_pytest_ini(self) -> None:
         self.write(
             self.project / "pytest.ini",
