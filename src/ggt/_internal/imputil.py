@@ -21,11 +21,17 @@ def set_sys_path(entries: list[str]) -> None:
 
 @contextlib.contextmanager
 def sys_path(*paths: str) -> Iterator[None]:
-    """Modify sys.path by temporarily placing the given entry in front"""
+    """Temporarily prepend paths without discarding import-time additions."""
     orig_sys_path = sys.path[:]
     paths_set = {*paths}
-    set_sys_path([*paths, *(p for p in orig_sys_path if p not in paths_set)])
+    scoped_sys_path = [
+        *paths,
+        *(path for path in orig_sys_path if path not in paths_set),
+    ]
+    set_sys_path(scoped_sys_path)
     try:
         yield
     finally:
-        set_sys_path(orig_sys_path)
+        scoped_paths = set(scoped_sys_path)
+        additions = [path for path in sys.path if path not in scoped_paths]
+        set_sys_path([*additions, *orig_sys_path])
