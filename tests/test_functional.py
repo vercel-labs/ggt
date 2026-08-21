@@ -203,6 +203,41 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_success(by_package)
         self.assertIn("tests ran: 1", by_package.output)
 
+    async def test_discovery_preserves_import_time_sys_path_additions(
+        self,
+    ) -> None:
+        package = self.project / "vendorhost"
+        self.write(
+            package / "__init__.py",
+            "import pathlib\n"
+            "import sys\n"
+            "vendor = str(pathlib.Path(__file__).parent / '_vendor')\n"
+            "sys.path.insert(0, vendor)\n",
+        )
+        self.write(package / "_vendor" / "vendored.py", "VALUE = 42\n")
+        self.write(
+            self.tests_dir / "test_01_load_vendorhost.py",
+            "import vendorhost\n\n"
+            "def test_loads_vendorhost():\n"
+            "    assert vendorhost.vendor\n",
+        )
+        self.write(
+            self.tests_dir / "test_02_use_vendored.py",
+            "from vendored import VALUE\n\n"
+            "def test_uses_vendored_module():\n"
+            "    assert VALUE == 42\n",
+        )
+
+        result = await self.run_ggt(
+            "tests",
+            "-j1",
+            "--output-format",
+            "simple",
+        )
+
+        await self.assert_success(result)
+        self.assertIn("tests ran: 2", result.output)
+
     async def test_repeated_include_and_exclude_filters(self) -> None:
         self.use_fixture("basic")
         result = await self.run_ggt(
