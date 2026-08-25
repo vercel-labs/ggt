@@ -10,8 +10,10 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass
 
@@ -70,6 +72,7 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         *args: str,
         cwd: pathlib.Path | None = None,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> RunResult:
         # Inner runs execute in fresh temporary projects, so the
         # preload fork server never has a warm module cache and only
@@ -91,8 +94,20 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
             env=env or self.env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=timeout is not None and os.name == "posix",
         )
-        stdout, stderr = await proc.communicate()
+        communicate = asyncio.create_task(proc.communicate())
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                asyncio.shield(communicate), timeout
+            )
+        except TimeoutError:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+            await communicate
+            self.fail(f"ggt did not exit within {timeout} seconds")
         assert proc.returncode is not None
         return RunResult(
             proc.returncode,
@@ -915,6 +930,66 @@ def test_installed_plugin_fixture(installed_plugin_value):
         self.skip_if_multiprocessing_blocked(result)
         await self.assert_success(result)
         self.assertIn("tests ran: 5", result.output)
+
+    async def test_worker_crash_fast_terminates_pool(self) -> None:
+        worker_state = self.project / "worker-state"
+        worker_state.mkdir()
+        self.write(
+            self.tests_dir / "test_worker_crash.py",
+            "import os\n"
+            "import pathlib\n"
+            "import time\n"
+            "import unittest\n"
+            "\n"
+            "state = pathlib.Path(os.environ['GGT_FUNCTIONAL_WORKER_STATE'])\n"
+            "if os.environ.get('GGT_PARALLEL') == '1':\n"
+            "    try:\n"
+            "        fd = os.open(\n"
+            "            state / 'crashed.pid',\n"
+            "            os.O_WRONLY | os.O_CREAT | os.O_EXCL,\n"
+            "        )\n"
+            "    except FileExistsError:\n"
+            "        (state / 'survivor.pid').write_text(str(os.getpid()))\n"
+            "    else:\n"
+            "        os.write(fd, str(os.getpid()).encode())\n"
+            "        os.close(fd)\n"
+            "        os._exit(23)\n"
+            "\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_a(self): time.sleep(10)\n"
+            "    def test_b(self): time.sleep(10)\n",
+        )
+
+        started = time.monotonic()
+        result = await self.run_ggt(
+            "tests/test_worker_crash.py",
+            "-j2",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_FUNCTIONAL_WORKER_STATE=str(worker_state)),
+            timeout=5,
+        )
+        elapsed = time.monotonic() - started
+
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_failure(result)
+        self.assertLess(elapsed, 5, result.output)
+        worker_pids = {
+            name: int((worker_state / name).read_text())
+            for name in ("crashed.pid", "survivor.pid")
+        }
+        self.assertEqual(len(set(worker_pids.values())), 2)
+
+        # communicate() returning promptly proves that no worker still holds
+        # the inherited output pipes on every platform.  POSIX additionally
+        # supports signal 0 as a direct process-liveness probe; Windows does
+        # not and reports ERROR_INVALID_PARAMETER for it.
+        if os.name == "posix":
+            for name, pid in worker_pids.items():
+                with self.assertRaises(
+                    ProcessLookupError, msg=f"{name}: {pid}"
+                ):
+                    os.kill(pid, 0)
 
     async def test_parallel_granularity_sorting_modes(self) -> None:
         self.use_fixture("granularity")

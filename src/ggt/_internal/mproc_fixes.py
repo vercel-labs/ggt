@@ -15,6 +15,7 @@ import multiprocessing.util
 import os
 import socket
 import sys
+import threading
 import types
 
 if TYPE_CHECKING:
@@ -82,6 +83,9 @@ def multiprocessing_worker_handler(*args: Any) -> None:
     if _orig_pool_worker_handler is not None:
         _orig_pool_worker_handler(*args)
 
+    if getattr(threading.current_thread(), "_ggt_fast_terminate", False):
+        return
+
     if len(args) == 1:
         # In some pythons this is a static method with
         # a single argument...
@@ -114,6 +118,54 @@ def join_exited_workers(pool: Any) -> None:
     # doing the joins so that we can detect crashes ourselves in the
     # test runner.x
     pass
+
+
+def fast_terminate_pool(pool: Any) -> None:
+    """Kill and reap a broken pool without running graceful teardown.
+
+    A worker crash can leave the remaining workers blocked indefinitely, and
+    ggt's normal pool shutdown deliberately gives worker destructors up to ten
+    seconds.  Stop the pool's maintenance threads first so they cannot replace
+    a worker while we are killing a stable snapshot, then use SIGKILL and only
+    wait for a short, shared deadline while reaping the children.
+    """
+    pool._state = multiprocessing.pool.TERMINATE
+    worker_handler = pool._worker_handler
+    worker_handler._ggt_fast_terminate = True
+    worker_handler._state = multiprocessing.pool.TERMINATE
+    for handler in (pool._task_handler, pool._result_handler):
+        handler._state = multiprocessing.pool.TERMINATE
+    pool._change_notifier.put(None)
+
+    deadline = time.monotonic() + 0.5
+
+    # The worker handler must stop before we take the process snapshot: it is
+    # otherwise allowed to replace a worker between our kill and hard exit.
+    # Its ggt wrapper sees the marker above and skips the normal ten-second
+    # destructor grace period, so this join only waits for CPython's
+    # maintenance loop to observe the notifier and exit.
+    worker_handler.join(timeout=max(0, deadline - time.monotonic()))
+
+    workers = tuple(pool._pool)
+    for worker in workers:
+        if worker.exitcode is not None:
+            continue
+        try:
+            worker.kill()
+        except (AttributeError, OSError):
+            # ``kill`` was added to multiprocessing.Process in Python 3.7,
+            # but alternate process implementations may only expose the
+            # softer termination primitive.
+            try:
+                worker.terminate()
+            except OSError:
+                pass
+
+    for worker in workers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        worker.join(timeout=remaining)
 
 
 def multiprocessing_help_stuff_finish(

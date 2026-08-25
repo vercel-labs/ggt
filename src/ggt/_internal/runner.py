@@ -724,7 +724,9 @@ class ParallelTestSuite(unittest.TestSuite):
                                         p.pid,
                                         result.current_pids.get(p.pid),
                                     )
+                                sys.stdout.flush()
                                 sys.stderr.flush()
+                                mproc_fixes.fast_terminate_pool(pool)
                                 os._exit(1)
 
                         if self.stop_requested:
