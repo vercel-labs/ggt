@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any, Protocol, Required
 from typing_extensions import TypeAliasType, TypedDict
 
 import asyncio
+from collections.abc import Mapping
 import functools
 import inspect
-import json
-import os
 import sys
 import time
 import traceback
@@ -19,7 +18,7 @@ from . import loader
 
 if TYPE_CHECKING:
     import unittest
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
 
 StatsEntry = TypedDict(
@@ -30,6 +29,14 @@ StatsEntry = TypedDict(
 
 
 Stats = TypeAliasType("Stats", list[tuple[str, StatsEntry]])
+
+FixtureData = TypeAliasType(
+    "FixtureData",
+    tuple[dict[str, object], dict[str, Mapping[str, object]]],
+)
+
+_global_fixture_data: dict[str, object] | None = None
+_class_fixture_data: dict[str, Mapping[str, object]] | None = None
 
 
 class _PhaseCallback(Protocol):
@@ -92,8 +99,7 @@ async def setup_test_cases(
             key = f"{testcls.__module__}.{testcls.__qualname__}".upper()
             class_data[key] = testcls.get_shared_data()
 
-    export_global_fixture_data(fixture_data)
-    export_class_fixture_data(class_data)
+    set_fixture_data(fixture_data, class_data)
 
     return stats
 
@@ -136,30 +142,20 @@ async def tear_down_test_cases(
 @functools.cache
 def _find_all_global_fixture_data() -> dict[tuple[str, str, str], str]:
     result: dict[tuple[str, str, str], Any] = {}
-    data = os.environ.get("GGT_TEST_GLOBAL_DATA")
-    if data:
-        try:
-            values = json.loads(data)
-            if not isinstance(values, dict):
-                raise ValueError("expected a dict in GGT_TEST_GLOBAL_DATA")
-        except ValueError:
+    for key, value in (_global_fixture_data or {}).items():
+        clsfqname, sep, attr = key.partition(":")
+        if not sep:
+            # Improperly formatted key?
             # XXX: log a warning
-            values = {}
+            continue
 
-        for key, value in values.items():
-            clsfqname, sep, attr = key.partition(":")
-            if not sep:
-                # Improperly formatted key?
-                # XXX: log a warning
-                continue
+        modname, dot, clsname = clsfqname.rpartition(".")
+        if not dot:
+            # Improperly formatted key?
+            # XXX: log a warning
+            continue
 
-            modname, dot, clsname = clsfqname.rpartition(".")
-            if not dot:
-                # Improperly formatted key?
-                # XXX: log a warning
-                continue
-
-            result[modname, clsname, attr] = value
+        result[modname, clsname, attr] = value
 
     return result
 
@@ -185,26 +181,31 @@ def import_class_fixture_data(cls: type[unittest.TestCase]) -> None:
     if not issubclass(cls, loader.GGTProto):
         return
     cls_key = f"{cls.__module__}.{cls.__qualname__}"
-    env_key = f"GGT_TEST_CLASS_DATA_{cls_key.upper()}"
-    data_string = os.environ.get(env_key, "")
-    if data_string:
-        class_data = json.loads(data_string)
+    data_key = cls_key.upper()
+    class_data = (_class_fixture_data or {}).get(data_key)
+    if class_data is not None:
         if not isinstance(class_data, dict):
-            raise RuntimeError(f"expected data in {env_key} to be a dict")
+            raise RuntimeError(
+                f"expected fixture data for {cls_key} to be a dict"
+            )
         cls.update_shared_data(**class_data)
 
 
-def export_global_fixture_data(
+def set_fixture_data(
     global_fixture_data: Mapping[str, object],
-) -> None:
-    os.environ["GGT_TEST_GLOBAL_DATA"] = json.dumps(global_fixture_data)
-
-
-def export_class_fixture_data(
     class_fixture_data: Mapping[str, Mapping[str, object]],
 ) -> None:
-    for key, data in class_fixture_data.items():
-        os.environ[f"GGT_TEST_CLASS_DATA_{key}"] = json.dumps(data)
+    """Install parent-produced fixture state in this process."""
+    global _global_fixture_data, _class_fixture_data  # noqa: PLW0603
+
+    _global_fixture_data = dict(global_fixture_data)
+    _class_fixture_data = dict(class_fixture_data)
+    _find_all_global_fixture_data.cache_clear()
+
+
+def get_fixture_data() -> FixtureData:
+    """Return fixture state for transfer to test workers."""
+    return (_global_fixture_data or {}, _class_fixture_data or {})
 
 
 def _collect_global_fixtures(

@@ -65,7 +65,13 @@ _ConnArgs = TypeAliasType("_ConnArgs", dict[str, Any])
 
 _WorkerParam = TypeAliasType(
     "_WorkerParam",
-    tuple[_ConnArgs | None, str | None, str | None, dict[str, str]],
+    tuple[
+        _ConnArgs | None,
+        str | None,
+        str | None,
+        dict[str, str],
+        fixtures.FixtureData,
+    ],
 )
 
 _ResultCall = TypeAliasType(
@@ -187,8 +193,15 @@ def init_worker(
     # The fork server's environment snapshot predates test discovery,
     # so runner state (shared fixture data in particular) travels
     # through the parameter queue instead of the environment.
-    _conn_args, _server_ver, _backend_dsn, ggt_env = param_queue.get()
+    (
+        _conn_args,
+        _server_ver,
+        _backend_dsn,
+        ggt_env,
+        fixture_data,
+    ) = param_queue.get()
     os.environ.update(ggt_env)
+    fixtures.set_fixture_data(*fixture_data)
 
     if additional_init:
         additional_init()
@@ -662,6 +675,7 @@ class ParallelTestSuite(unittest.TestSuite):
             for key, value in os.environ.items()
             if key.startswith("GGT_")
         }
+        fixture_data = fixtures.get_fixture_data()
         for _ in range(self.num_workers):
             worker_param_queue.put(
                 (
@@ -669,6 +683,7 @@ class ParallelTestSuite(unittest.TestSuite):
                     self.server_ver,
                     self.backend_dsn,
                     ggt_env,
+                    fixture_data,
                 )
             )
 

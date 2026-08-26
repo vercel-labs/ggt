@@ -9,6 +9,7 @@ import unittest
 
 
 EVENTS = pathlib.Path(os.environ["GGT_FUNCTIONAL_EVENTS"])
+SHARED_SIZE = int(os.environ.get("GGT_FUNCTIONAL_SHARED_SIZE", "0"))
 
 
 def event(name, **data):
@@ -21,6 +22,7 @@ def event(name, **data):
 class SharedFixture:
     def __init__(self):
         self.value = None
+        self.payload = ""
         self.options = {}
 
     def __get__(self, instance, owner=None):
@@ -41,10 +43,11 @@ class SharedFixture:
         event("fixture_post", cases=len(cases))
 
     def get_shared_data(self):
-        return {"value": self.value}
+        return {"value": self.value, "payload": "x" * SHARED_SIZE}
 
     def set_shared_data(self, data):
         self.value = data["value"]
+        self.payload = data["payload"]
         event("fixture_import", value=self.value)
 
 
@@ -60,7 +63,10 @@ class Hooked(unittest.TestCase):
 
     @classmethod
     async def set_up_class_once(cls, ui):
-        cls.data = {"class_value": "class-" + cls.options["color"]}
+        cls.data = {
+            "class_value": "class-" + cls.options["color"],
+            "payload": "x" * SHARED_SIZE,
+        }
         event("class_setup", value=cls.data["class_value"])
 
     @classmethod
@@ -79,6 +85,8 @@ class Hooked(unittest.TestCase):
     def test_one(self):
         self.assertEqual(self.shared.value, "fixture-blue")
         self.assertEqual(self.data["class_value"], "class-blue")
+        self.assertEqual(len(self.shared.payload), SHARED_SIZE)
+        self.assertEqual(len(self.data["payload"]), SHARED_SIZE)
 
     def test_two(self):
         self.assertEqual(self.shared.value, "fixture-blue")

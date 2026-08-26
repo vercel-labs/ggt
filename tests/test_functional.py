@@ -919,6 +919,26 @@ def test_installed_plugin_fixture(installed_plugin_value):
         self.assertIn("fixture_import", names)
         self.assertIn("class_import", names)
 
+    async def test_parallel_shared_data_can_exceed_windows_env_limit(
+        self,
+    ) -> None:
+        events = self.project / "events"
+        self.use_fixture("hooks")
+        result = await self.run_ggt(
+            "tests/test_hooks.py",
+            "-j2",
+            "-X",
+            "color=blue",
+            "--output-format",
+            "simple",
+            env=self.env(
+                GGT_FUNCTIONAL_EVENTS=str(events),
+                GGT_FUNCTIONAL_SHARED_SIZE="40000",
+            ),
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+
     async def test_parallel_pickling_restores_testcase_variants(self) -> None:
         self.use_fixture("pickle")
         result = await self.run_ggt(
@@ -1138,8 +1158,16 @@ def test_installed_plugin_fixture(installed_plugin_value):
         }
         script = self.write(
             self.project / "probe.py",
+            "import importlib.util\n"
+            "import json\n"
+            "import os\n"
             "import pathlib\n"
             "import sys\n"
+            f"state = {state!r}\n"
+            "importer_spec = importlib.util.find_spec('importer')\n"
+            "assert importer_spec is not None\n"
+            "state['modules'][-1][1] = importer_spec.origin\n"
+            "os.environ['GGT_PRELOAD_MODULES'] = json.dumps(state)\n"
             "import ggt._internal.preload\n"
             f"marker = pathlib.Path({str(marker)!r})\n"
             "assert marker.read_text() == 'x'\n"
@@ -1153,7 +1181,7 @@ def test_installed_plugin_fixture(installed_plugin_value):
             sys.executable,
             str(script),
             cwd=self.project,
-            env=self.env(GGT_PRELOAD_MODULES=json.dumps(state)),
+            env=self.env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
