@@ -1109,6 +1109,58 @@ def test_installed_plugin_fixture(installed_plugin_value):
         self.assertEqual(proc.returncode, 0, stderr.decode())
         self.assertEqual(stdout.decode().strip(), "ok")
 
+    async def test_preload_skips_stale_origin_before_import_side_effects(
+        self,
+    ) -> None:
+        marker = self.project / "imported"
+        replacement = self.write(
+            self.project / "renamed_package.py",
+            "import pathlib\n"
+            f"marker = pathlib.Path({str(marker)!r})\n"
+            "marker.write_text(marker.read_text() + 'x' if marker.exists() else 'x')\n",
+        )
+        importer = self.write(
+            self.project / "importer.py",
+            "import renamed_package\n",
+        )
+        state = {
+            "modules": [
+                [
+                    "renamed_package",
+                    str(self.project / "renamed_package" / "__init__.py"),
+                ],
+                [
+                    "renamed_package.child",
+                    str(self.project / "renamed_package" / "child.py"),
+                ],
+                ["importer", str(importer.resolve())],
+            ],
+        }
+        script = self.write(
+            self.project / "probe.py",
+            "import pathlib\n"
+            "import sys\n"
+            "import ggt._internal.preload\n"
+            f"marker = pathlib.Path({str(marker)!r})\n"
+            "assert marker.read_text() == 'x'\n"
+            "assert 'renamed_package' in sys.modules\n"
+            "import renamed_package\n"
+            "assert marker.read_text() == 'x'\n"
+            f"assert pathlib.Path(renamed_package.__file__).samefile({str(replacement)!r})\n"
+            "print('ok')\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(GGT_PRELOAD_MODULES=json.dumps(state)),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout.decode().strip(), "ok")
+
     async def test_preload_replay_suppresses_import_warnings(self) -> None:
         warning_module = self.write(
             self.project / "warn_on_import.py",

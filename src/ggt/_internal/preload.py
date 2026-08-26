@@ -55,6 +55,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import importlib
+import importlib.util
 import json
 import multiprocessing
 import multiprocessing.forkserver
@@ -279,12 +280,35 @@ def _preload() -> None:
     # These imports are speculative warm-up work, not part of the test run.
     # Do not leak dependency warnings directly from the fork server; modules
     # imported normally by a worker retain the process's usual warning policy.
+    validated_modules: list[list[str]] = []
+    stale_modules: set[str] = set()
+    own_package = __name__.partition(".")[0]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for entry in modules:
             try:
-                name, _origin = entry
-                importlib.import_module(str(name))
+                name, origin = entry
+                name = str(name)
+                if name == own_package or name.startswith(f"{own_package}."):
+                    # The active ggt tree is already authoritative and must
+                    # not be split into multiple module generations.
+                    importlib.import_module(name)
+                    continue
+                if any(
+                    name == stale or name.startswith(f"{stale}.")
+                    for stale in stale_modules
+                ):
+                    continue
+                spec = importlib.util.find_spec(name)
+                if spec is None or spec.origin != origin:
+                    # Validate before executing the module.  Importing a
+                    # renamed/replaced module for a stale cache entry can
+                    # run registration and other process-global side
+                    # effects even if the post-pass evicts it afterward.
+                    stale_modules.add(name)
+                    continue
+                importlib.import_module(name)
+                validated_modules.append([name, str(origin)])
             except BaseException:  # noqa: S112
                 continue
 
@@ -294,8 +318,7 @@ def _preload() -> None:
     # the import loop because importing a submodule re-imports its
     # parent packages as a side effect, potentially re-poisoning an
     # entry that was checked earlier.
-    own_package = __name__.partition(".")[0]
-    for entry in modules:
+    for entry in validated_modules:
         try:
             name, origin = entry
         except ValueError:
