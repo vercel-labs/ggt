@@ -13,8 +13,8 @@ fixture (transitively) used by a module's tests, a
 TestCase classes.  The ggt runner then:
 
 - executes the fixture once in the parent via ``set_up()``;
-- ships the pickled value to workers through the standard
-  ``GGT_TEST_GLOBAL_DATA`` channel (``get_shared_data()`` returns a
+- ships the pickled value through ggt's worker initialization channel
+  (``get_shared_data()`` returns a
   JSON-safe envelope: inline base64 for small values, a temp-file
   reference for large ones);
 - workers hydrate the value in ``set_shared_data()``, seeding the
