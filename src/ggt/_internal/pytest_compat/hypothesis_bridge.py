@@ -29,7 +29,7 @@ import inspect
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Coroutine, Iterator
 
 BRIDGE_MARKER = "__ggt_hypothesis_bridge__"
 
@@ -38,6 +38,9 @@ BRIDGE_MARKER = "__ggt_hypothesis_bridge__"
 _backend: contextvars.ContextVar[tuple[str, dict[str, Any]] | None] = (
     contextvars.ContextVar("ggt_hypothesis_backend", default=None)
 )
+_asyncio_runner: contextvars.ContextVar[
+    Callable[[Coroutine[Any, Any, Any]], Any] | None
+] = contextvars.ContextVar("ggt_hypothesis_asyncio_runner", default=None)
 
 
 def current_inner(
@@ -73,7 +76,11 @@ def install_bridge(
         if backend is None:
             coro = inner_test(*args, **kw)
             assert inspect.isawaitable(coro)
-            asyncio.run(cast("Any", coro))
+            run = _asyncio_runner.get()
+            if run is None:
+                asyncio.run(cast("Any", coro))
+            else:
+                run(cast("Any", coro))
         else:
             import anyio  # noqa: PLC0415
 
@@ -97,6 +104,17 @@ def backend_context(
         yield
     finally:
         _backend.reset(token)
+
+
+@contextlib.contextmanager
+def runner_context(
+    run: Callable[[Coroutine[Any, Any, Any]], Any],
+) -> Iterator[None]:
+    token = _asyncio_runner.set(run)
+    try:
+        yield
+    finally:
+        _asyncio_runner.reset(token)
 
 
 def suppress_differing_executors(fn: Callable[..., object]) -> None:

@@ -569,6 +569,25 @@ class ParallelTestSuite(unittest.TestSuite):
         test counts.  Returns None when grouping would hurt load
         balancing (too few modules relative to the worker count).
         """
+        affinity_groups: dict[tuple[str, object], list[unittest.TestCase]] = {}
+        ungrouped: list[unittest.TestCase] = []
+        for test in tests:
+            method = getattr(type(test), test._testMethodName, None)
+            affinity = getattr(method, "__ggt_async_affinity__", None)
+            if affinity is None:
+                ungrouped.append(test)
+                continue
+            scope, key = affinity
+            if scope == "class":
+                key = type(test)
+            affinity_groups.setdefault((scope, key), []).append(test)
+
+        if affinity_groups:
+            return [
+                *affinity_groups.values(),
+                *([test] for test in ungrouped),
+            ]
+
         if self.distribute != "module":
             return None
 

@@ -128,7 +128,9 @@ Test Selection
    imported).
 
 ``--repeat INTEGER``
-   Repeat the test suite N times or until the first failure.
+   Repeat the test suite N times or until the first failure. Collection,
+   selection and sharding happen once; every repeat is a fresh session with
+   reconstructed cases, workers, fixture caches, contexts and loop runners.
 
 Output and Reporting
 --------------------
@@ -276,16 +278,18 @@ What works
   ``setup_method``/``teardown_method``.
 - **Imperative outcomes**: ``pytest.skip()``, ``pytest.fail()``,
   ``pytest.raises()``, ``pytest.approx()``.
-- **Async tests and async fixtures**: ``async def test_*`` functions
-  and methods run on synthesized ``unittest.IsolatedAsyncioTestCase``
-  classes — each test gets a fresh event loop, matching
-  pytest-asyncio's default loop scope (no ``asyncio_mode``
-  configuration needed; ``@pytest.mark.asyncio`` markers are accepted
-  and ignored).  ``async def`` fixtures (including ``yield``
-  teardown) resolve inside the requesting test's event loop and are
-  restricted to function scope — wider scopes would bind a value to a
-  single test's loop.  A sync fixture may depend on an async fixture
-  when the requesting test is async.
+- **Async tests and async fixtures**: ggt is always in auto mode.  Async
+  tests and fixture setup/finalization are dispatched by synchronous
+  ``unittest.TestCase`` wrappers through scoped ``asyncio.Runner`` instances.
+  Function, class, module, package and session loop scopes are supported via
+  ``@pytest.mark.asyncio(loop_scope=...)`` (and deprecated ``scope=``),
+  ``asyncio_default_test_loop_scope``,
+  ``pytest_asyncio.fixture(loop_scope=...)`` and
+  ``asyncio_default_fixture_loop_scope``.  Fixture cache scope is the final
+  fixture-loop fallback; the test-loop default remains function scope.  Sync
+  fixtures and tests may depend on async fixtures.  AnyIO-marked tests retain
+  ownership of their backend.  Custom loop factories, ``event_loop`` fixtures
+  and event-loop policy overrides are rejected.
 - **anyio**: tests marked ``@pytest.mark.anyio`` follow anyio's
   plugin contract natively — the ``anyio_backend`` fixture joins the
   test's fixture closure (the built-in default is parametrized over
@@ -302,8 +306,13 @@ workers, sharding, timing logs, result logs, ``-k``/``-e`` selection)
 applies uniformly.
 
 Unlike stock pytest — and like ``pytest-xdist`` — tests run in worker
-processes.  ggt goes one step further with **shared fixtures**:
-session- and module-scoped fixture values are computed *once* in the
+processes.  Wider async scopes are therefore per participating worker;
+session scope means once in each matching worker.  Live loop-affine objects
+such as database pools cannot be shared across processes and are finalized
+before their worker-local runner closes.
+
+ggt goes one step further with **shared fixtures**: synchronous session-,
+package- and module-scoped fixture values are computed *once* in the
 runner process, pickled, and shipped to all workers.  Fixture teardown
 (the code after ``yield``) also runs once, in the runner.  Values that
 cannot be pickled automatically fall back to lazy per-worker execution
@@ -342,9 +351,8 @@ they contribute their fixtures at lower lookup priority than any
 conftest.  ``pytest_generate_tests``; indirect
 parametrization;
 dynamically requested parametrized fixtures
-(``request.getfixturevalue()`` of a parametrized fixture); package-
-and dynamically-scoped fixtures; async fixtures with
-class/module/session scope; ``capfd``; ini options beyond the subset
+(``request.getfixturevalue()`` of a parametrized fixture); dynamically
+scoped fixtures; ``capfd``; ini options beyond the subset
 above; and pytest's ``-k`` expression syntax (ggt's regex-based
 ``-k`` applies instead; use ``-m`` for mark expressions).
 

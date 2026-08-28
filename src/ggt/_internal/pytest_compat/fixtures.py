@@ -39,7 +39,7 @@ import unittest
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from ..decorators import LOCAL_FIXTURE_ATTR
-from . import builtin_fixtures, discovery, outcomes
+from . import builtin_fixtures, discovery, outcomes, scoped_runner
 
 # Imported for their side effect of contributing to the builtin
 # fixture registry.
@@ -52,7 +52,8 @@ SCOPE_ORDER = {
     "function": 0,
     "class": 1,
     "module": 2,
-    "session": 3,
+    "package": 3,
+    "session": 4,
 }
 
 _NAMED_KINDS = frozenset(
@@ -152,6 +153,7 @@ class FixtureDef:
     is_async: bool = False
     ids: object = None
     local: bool = False
+    loop_scope: object | None = None
 
     def __hash__(self) -> int:
         return id(self)
@@ -224,11 +226,6 @@ def _make_fixture_def(
             f"dynamic fixture scopes are not supported by ggt pytest "
             f"compatibility: fixture {name!r} in {source}"
         )
-    if scope == "package":
-        raise FixtureError(
-            f"package-scoped fixtures are not supported by ggt pytest "
-            f"compatibility: fixture {name!r} in {source}"
-        )
     if scope not in SCOPE_ORDER:
         raise FixtureError(
             f"unknown fixture scope {scope!r}: fixture {name!r} in {source}"
@@ -237,6 +234,27 @@ def _make_fixture_def(
     is_async = inspect.iscoroutinefunction(func) or (
         inspect.isasyncgenfunction(func)
     )
+    loop_scope = next(
+        (
+            value
+            for holder in (obj, func, marker)
+            for attr in ("_loop_scope", "_pytest_asyncio_loop_scope")
+            if (value := getattr(holder, attr, None)) is not None
+        ),
+        None,
+    )
+    if name in {"event_loop", "event_loop_policy", "loop_factory"}:
+        raise FixtureError(
+            f"pytest-asyncio loop factories and policy overrides are not "
+            f"supported by ggt: fixture {name!r} in {source}"
+        )
+    if is_async:
+        try:
+            scoped_runner.fixture_loop_scope(
+                loop_scope, cache_scope=scope, source=f"fixture {name!r}"
+            )
+        except ValueError as exc:
+            raise FixtureError(str(exc)) from exc
 
     params = getattr(marker, "params", None)
 
@@ -255,6 +273,7 @@ def _make_fixture_def(
             getattr(obj, LOCAL_FIXTURE_ATTR, False)
             or getattr(func, LOCAL_FIXTURE_ATTR, False)
         ),
+        loop_scope=loop_scope,
     )
 
 
@@ -520,6 +539,12 @@ class FixtureEngine:
                 if first_error is None:
                     first_error = e
 
+        try:
+            scoped_runner.close(scope, scope_key)
+        except BaseException as e:
+            if first_error is None:
+                first_error = e
+
         if first_error is not None:
             raise first_error
 
@@ -531,6 +556,9 @@ class FixtureEngine:
 
     def teardown_module(self, modname: str) -> None:
         self._teardown("module", modname)
+
+    def teardown_package(self, package: str) -> None:
+        self._teardown("package", package)
 
     def teardown_session(self) -> None:
         # Tear down anything that is still standing, narrowest scope
@@ -580,8 +608,18 @@ def teardown_module(modname: str) -> None:
     _engine.teardown_module(modname)
 
 
+def teardown_package(package: str) -> None:
+    _engine.teardown_package(package)
+
+
 def teardown_session() -> None:
-    _engine.teardown_session()
+    try:
+        _engine.teardown_session()
+    finally:
+        try:
+            scoped_runner.close_all()
+        finally:
+            _seeded_values.clear()
 
 
 class ConfigLite:
@@ -793,12 +831,43 @@ class TestExecution:
             )
 
     def scope_key(self, scope: str) -> object:
-        keys: dict[str, object] = {
-            "function": self.token,
-            "class": self.synth_cls,
-            "module": self.mod.__name__,
-        }
-        return keys.get(scope)
+        return scoped_runner.scope_key(
+            scope,
+            mod=self.mod,
+            synth_cls=self.synth_cls,
+            token=self.token,
+        )
+
+    def fixture_loop_scope(self, fdef: FixtureDef) -> str:
+        return scoped_runner.fixture_loop_scope(
+            fdef.loop_scope,
+            cache_scope=fdef.scope,
+            source=f"fixture {fdef.name!r} in {fdef.source}",
+        )
+
+    def prepare_async(
+        self,
+        *,
+        usefixtures: Sequence[str],
+        argnames: Sequence[str],
+        params: Mapping[str, object],
+    ) -> dict[str, object]:
+        for fdef, index in self.registry.autouse_defs():
+            self._value_of_scoped(fdef, index)
+        for name in usefixtures:
+            self.get_scoped(name)
+        kwargs: dict[str, object] = {**params}
+        for name in argnames:
+            kwargs[name] = self.get_scoped(name)
+        return kwargs
+
+    def get_scoped(self, name: str) -> object:
+        if name == "request":
+            return self._request
+        found = self.registry.lookup(name)
+        if found is None:
+            raise FixtureLookupError(self._lookup_error_message(name))
+        return self._value_of_scoped(*found)
 
     def resolve_autouse(self) -> None:
         for fdef, index in self.registry.autouse_defs():
@@ -932,14 +1001,6 @@ class TestExecution:
         if value is not _MISSING:
             return value
 
-        if fdef.is_async and fdef.scope != "function":
-            raise FixtureError(
-                f"async fixtures are only supported with function "
-                f"scope: fixture {fdef.name!r} in {fdef.source} has "
-                f"scope {fdef.scope!r} (its value would be bound to a "
-                f"single test's event loop)"
-            )
-
         self._check_resolvable(fdef)
 
         self._resolving.append(fdef)
@@ -949,6 +1010,36 @@ class TestExecution:
             self._resolving.pop()
 
         value = await self._instantiate_async(fdef, scope_key, kwargs)
+        _engine._cache[cache_key] = value
+        return value
+
+    def _value_of_scoped(self, fdef: FixtureDef, index: int) -> object:
+        scope_key, cache_key, value = self._lookup_cached(fdef)
+        if value is not _MISSING:
+            return value
+
+        self._check_resolvable(fdef)
+        self._resolving.append(fdef)
+        try:
+            kwargs = self._resolve_args_scoped(fdef, index)
+        finally:
+            self._resolving.pop()
+
+        if fdef.is_async:
+            loop_scope = self.fixture_loop_scope(fdef)
+            loop_key = self.scope_key(loop_scope)
+            value = scoped_runner.run(
+                loop_scope,
+                loop_key,
+                self._instantiate_async(
+                    fdef,
+                    scope_key,
+                    kwargs,
+                    scoped_finalizer=True,
+                ),
+            )
+        else:
+            value = self._instantiate(fdef, scope_key, kwargs)
         _engine._cache[cache_key] = value
         return value
 
@@ -1008,6 +1099,20 @@ class TestExecution:
 
         return kwargs
 
+    def _resolve_args_scoped(
+        self,
+        fdef: FixtureDef,
+        index: int,
+    ) -> dict[str, object]:
+        kwargs: dict[str, object] = {}
+        for argname in fdef.argnames:
+            if argname == "request":
+                kwargs[argname] = FixtureRequest(self, fdef)
+                continue
+            dep, dep_index = self._dep_of(fdef, index, argname)
+            kwargs[argname] = self._value_of_scoped(dep, dep_index)
+        return kwargs
+
     def _instantiate(
         self,
         fdef: FixtureDef,
@@ -1051,6 +1156,8 @@ class TestExecution:
         fdef: FixtureDef,
         scope_key: object,
         kwargs: dict[str, object],
+        *,
+        scoped_finalizer: bool = False,
     ) -> object:
         func = fdef.func
         args: tuple[object, ...] = ()
@@ -1076,7 +1183,20 @@ class TestExecution:
                         f"more than once"
                     )
 
-            self._async_finalizers.append(finalizer)
+            if scoped_finalizer:
+                loop_scope = self.fixture_loop_scope(fdef)
+                loop_key = self.scope_key(loop_scope)
+
+                def finish_async_fixture() -> None:
+                    scoped_runner.run(loop_scope, loop_key, finalizer())
+
+                _engine.add_finalizer(
+                    fdef.scope, scope_key, finish_async_fixture
+                )
+            else:
+                # AnyIO owns this execution backend; finalization must
+                # remain in _run_async_body on that same backend.
+                self._async_finalizers.append(finalizer)
             return value
 
         if inspect.iscoroutinefunction(func):
