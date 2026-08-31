@@ -1324,6 +1324,31 @@ def test_installed_plugin_fixture(installed_plugin_value):
         self.assertEqual(proc.returncode, 0, stderr.decode())
         self.assertEqual(stdout.decode().strip(), "ok")
 
+    async def test_resource_tracker_recovery_is_posix_only(self) -> None:
+        script = self.write(
+            self.project / "probe.py",
+            "from ggt._internal import mproc_fixes\n"
+            "\n"
+            "def fail():\n"
+            "    raise AssertionError('resource tracker was started')\n"
+            "\n"
+            "mproc_fixes.os.name = 'nt'\n"
+            "mproc_fixes.multiprocessing.resource_tracker.ensure_running = fail\n"
+            "mproc_fixes.ensure_resource_tracker()\n"
+            "print('ok')\n",
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            cwd=self.project,
+            env=self.env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertEqual(stdout.decode().strip(), "ok")
+
     async def test_running_times_log_write_skipped_while_locked(
         self,
     ) -> None:
@@ -2365,6 +2390,45 @@ addopts = "'unterminated"
         self.assertTrue(
             any((self.project / ".ggt_cache" / "v1").glob("preload-*.json"))
         )
+
+    @unittest.skipIf(os.name != "posix", "requires POSIX signals")
+    async def test_warm_preload_recovers_dead_resource_tracker(self) -> None:
+        marker = self.project / "kill-resource-tracker"
+        self.write(
+            self.tests_dir / "test_tracker_recovery.py",
+            "import os\n"
+            "import pathlib\n"
+            "import signal\n"
+            "import unittest\n"
+            "from multiprocessing import resource_tracker\n"
+            "\n"
+            "marker = pathlib.Path(os.environ['GGT_TRACKER_MARKER'])\n"
+            "if marker.exists():\n"
+            "    tracker = resource_tracker._resource_tracker\n"
+            "    if tracker._pid is not None:\n"
+            "        os.kill(tracker._pid, signal.SIGKILL)\n"
+            "        os.waitpid(tracker._pid, 0)\n"
+            "else:\n"
+            "    marker.touch()\n"
+            "\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_a(self): pass\n"
+            "    def test_b(self): pass\n",
+        )
+
+        for _ in range(2):
+            result = await self.run_ggt(
+                "tests/test_tracker_recovery.py",
+                "-j2",
+                "--preload",
+                "--output-format",
+                "simple",
+                env=self.env(GGT_TRACKER_MARKER=str(marker)),
+            )
+            self.skip_if_multiprocessing_blocked(result)
+            await self.assert_success(result)
+            self.assertNotIn("KeyError", result.output)
+            self.assertNotIn("process died unexpectedly", result.output)
 
     async def test_pytest_compat_unsupported_features_are_reported(
         self,

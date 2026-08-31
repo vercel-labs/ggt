@@ -11,12 +11,14 @@ import time
 import multiprocessing.pool
 import multiprocessing.process
 import multiprocessing.reduction
+import multiprocessing.resource_tracker
 import multiprocessing.util
 import os
 import socket
 import sys
 import threading
 import types
+import warnings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -327,3 +329,29 @@ def patch_multiprocessing_reduction() -> None:
         types.TracebackType,
         lambda _: (_restore_Traceback, ()),
     )
+
+
+def ensure_resource_tracker() -> None:
+    """Repair a dead resource tracker before creating worker resources.
+
+    A warm fork server starts Python's shared resource tracker before test
+    discovery and session setup.  If code in either phase kills that helper,
+    the first later semaphore registration discovers the broken pipe.  CPython
+    relaunches the tracker but loses that registration, so the semaphore's
+    finalizer sends an unmatched unregister and the tracker prints a KeyError.
+
+    An explicit probe carries no registration payload, allowing CPython to
+    relaunch the helper before multiprocessing queues create semaphores.  The
+    generic relaunch warning is suppressed because recovery here is complete
+    and requires no action from the test author.
+    """
+    if os.name != "posix":
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="resource_tracker: process died unexpectedly, relaunching",
+            category=UserWarning,
+        )
+        multiprocessing.resource_tracker.ensure_running()

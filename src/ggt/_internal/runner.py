@@ -621,6 +621,11 @@ class ParallelTestSuite(unittest.TestSuite):
         return [chunk for _, chunk in tasks]
 
     def run(self, result: ParallelTextTestResult) -> ParallelTextTestResult:  # type: ignore [override]  # ty: ignore[invalid-method-override]
+        # Warm preloading starts multiprocessing's resource tracker before
+        # discovery and session setup. Repair it now if either phase killed it,
+        # before a queue semaphore can lose its registration during relaunch.
+        mproc_fixes.ensure_resource_tracker()
+
         # We use SimpleQueues because they are more predictable.
         # They do the necessary IO directly, without using a
         # helper thread.
