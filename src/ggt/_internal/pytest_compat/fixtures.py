@@ -331,6 +331,7 @@ def _builtin_fixture_source() -> dict[str, FixtureDef]:
             needs_instance=False,
             argnames=spec.argnames,
             source="ggt builtins",
+            local=spec.local,
         )
     return result
 
