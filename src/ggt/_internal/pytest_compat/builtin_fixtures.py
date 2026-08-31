@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import re
+import shutil
 import sys
 import tempfile
 import warnings
@@ -38,6 +39,7 @@ class BuiltinFixtureSpec:
     argnames: tuple[str, ...]
     func: Callable[..., object]
     params: tuple[object, ...] | None = None
+    local: bool = False
 
 
 _registry: dict[str, BuiltinFixtureSpec] = {}
@@ -50,6 +52,7 @@ def register(
     scope: str = "function",
     argnames: tuple[str, ...] = (),
     params: tuple[object, ...] | None = None,
+    local: bool = False,
 ) -> None:
     """Register a built-in fixture.
 
@@ -65,6 +68,7 @@ def register(
         argnames=argnames,
         func=func,
         params=params,
+        local=local,
     )
 
 
@@ -478,8 +482,17 @@ def _recwarn() -> Iterator[WarningsRecorder]:
         yield recorder
 
 
-def _tmp_path_factory() -> TempPathFactory:
-    return TempPathFactory()
+def _tmp_path_factory() -> Iterator[TempPathFactory]:
+    factory = TempPathFactory()
+    try:
+        yield factory
+    finally:
+        basetemp = factory._basetemp
+        if basetemp is not None:
+            try:
+                shutil.rmtree(basetemp)
+            except FileNotFoundError:
+                pass
 
 
 def _tmp_path(tmp_path_factory: TempPathFactory, request: Any) -> pathlib.Path:
@@ -495,7 +508,12 @@ def _monkeypatch() -> Iterator[MonkeyPatch]:
         mp.undo()
 
 
-register("tmp_path_factory", scope="session", func=_tmp_path_factory)
+register(
+    "tmp_path_factory",
+    scope="session",
+    func=_tmp_path_factory,
+    local=True,
+)
 register(
     "tmp_path",
     argnames=("tmp_path_factory", "request"),

@@ -1635,6 +1635,62 @@ def test_installed_plugin_fixture(installed_plugin_value):
         await self.assert_success(result)
         self.assertIn("tests ran: 19", result.output)
 
+    async def test_pytest_compat_tmp_path_cleanup(self) -> None:
+        self.write(
+            self.tests_dir / "test_tmp_path_cleanup.py",
+            """\
+import os
+
+
+def test_tmp_path_one(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "data.txt").write_text("data", encoding="utf-8")
+
+
+def test_tmp_path_two(tmp_path_factory):
+    path = tmp_path_factory.mktemp("factory")
+    (path / "data.txt").write_text("data", encoding="utf-8")
+    if os.environ.get("GGT_FUNCTIONAL_FAIL_TMP_PATH") == "1":
+        raise AssertionError("intentional failure")
+""",
+        )
+
+        for jobs, should_fail in (
+            ("-j1", False),
+            ("-j2", False),
+            ("-j1", True),
+            ("-j2", True),
+        ):
+            with self.subTest(jobs=jobs, should_fail=should_fail):
+                # Keep TMPDIR short on POSIX: multiprocessing's forkserver
+                # creates an AF_UNIX socket below it, and macOS has a small
+                # socket-path limit.
+                temp_parent = "/tmp" if os.name == "posix" else None
+                with tempfile.TemporaryDirectory(
+                    prefix="ggt-cleanup-", dir=temp_parent
+                ) as tempdir_name:
+                    tempdir = pathlib.Path(tempdir_name)
+                    result = await self.run_ggt(
+                        "tests/test_tmp_path_cleanup.py",
+                        jobs,
+                        "--output-format",
+                        "simple",
+                        env=self.env(
+                            TMPDIR=str(tempdir),
+                            GGT_FUNCTIONAL_FAIL_TMP_PATH=(
+                                "1" if should_fail else "0"
+                            ),
+                        ),
+                    )
+                    if jobs == "-j2":
+                        self.skip_if_multiprocessing_blocked(result)
+                    if should_fail:
+                        await self.assert_failure(result)
+                    else:
+                        await self.assert_success(result)
+                    self.assertEqual(list(tempdir.glob("ggt-pytest-*")), [])
+
     async def test_pytest_compat_filtering(self) -> None:
         self.use_fixture("pytestcompat")
         result = await self.run_ggt(
