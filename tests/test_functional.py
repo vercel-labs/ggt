@@ -492,6 +492,28 @@ class FunctionalTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_failure(stopped)
         self.assertIn("tests ran: 1", stopped.output)
 
+    async def test_repeat_reconstructs_fresh_async_cases_once_collected(
+        self,
+    ) -> None:
+        self.use_fixture("repeatfresh")
+        for jobs in ("1", "2"):
+            count = self.project / f"collections-{jobs}"
+            count.write_text("0", encoding="utf-8")
+            result = await self.run_ggt(
+                "tests/test_repeat_fresh.py",
+                "-j",
+                jobs,
+                "--repeat",
+                "100",
+                "--output-format",
+                "silent",
+                env=self.env(GGT_COLLECTION_COUNT=str(count)),
+            )
+            self.skip_if_multiprocessing_blocked(result)
+            await self.assert_success(result)
+            self.assertEqual(count.read_text(encoding="utf-8"), "1")
+            self.assertIn("Repeat #100 out of 100", result.output)
+
     async def test_pytest_compat_entrypoint_plugin_fixtures(self) -> None:
         self.use_fixture("basic")
         plugin = self.write(
@@ -2435,24 +2457,72 @@ addopts = "'unterminated"
     ) -> None:
         self.use_fixture("pytestcompat")
         result = await self.run_ggt(
-            "unsupported",
+            "unsupported/test_unsupported.py",
             "-j1",
             "--output-format",
             "simple",
         )
         await self.assert_failure(result)
-        self.assertIn("tests ran: 3", result.output)
-        self.assertIn("errors: 3", result.output)
+        self.assertIn("tests ran: 1", result.output)
+        self.assertIn("errors: 1", result.output)
         self.assertIn("requested dynamically", result.output)
         self.assertIn("parametrized_fixture", result.output)
+
+        loop_override = await self.run_ggt("loopoverride", "-j1")
+        await self.assert_failure(loop_override)
         self.assertIn(
-            "async fixtures are only supported with function scope",
-            result.output,
+            "loop factories and policy overrides", loop_override.output
         )
-        self.assertIn(
-            "can only be requested by async tests",
-            result.output,
+
+    async def test_pytest_asyncio_loop_scope_defaults(self) -> None:
+        self.use_fixture("pytestcompat")
+        result = await self.run_ggt(
+            ".",
+            "-j1",
+            cwd=self.project / "loopdefaults",
+            env=self.env(),
         )
+        await self.assert_success(result)
+        self.assertIn("tests ran: 2", result.output)
+
+    async def test_pytest_asyncio_scoped_runners_repeat_and_parallelism(
+        self,
+    ) -> None:
+        self.use_fixture("pytestcompat")
+        events = self.project / "loop-events"
+        result = await self.run_ggt(
+            "loopscopes",
+            "-j2",
+            "--repeat",
+            "5",
+            "--output-format",
+            "simple",
+            env=self.env(GGT_LOOP_EVENTS=str(events)),
+        )
+        self.skip_if_multiprocessing_blocked(result)
+        await self.assert_success(result)
+        self.assertIn("Repeat #5 out of 5", result.output)
+
+        recorded = [
+            line
+            for path in events.parent.glob(f"{events.name}.*")
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        setups = [
+            line.removeprefix("setup:")
+            for line in recorded
+            if line.startswith("setup:")
+        ]
+        teardowns = [
+            line.removeprefix("teardown:")
+            for line in recorded
+            if line.startswith("teardown:")
+        ]
+        self.assertCountEqual(setups, teardowns)
+        for scope in ("function", "class", "module", "package", "session"):
+            self.assertTrue(
+                any(line.startswith(f"{scope}:") for line in setups)
+            )
 
     async def test_coverage_success_and_missing_coverage_message(self) -> None:
         self.use_fixture("samplepkg")

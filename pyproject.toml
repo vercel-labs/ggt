@@ -35,6 +35,7 @@ coverage = [
 ]
 pytest = [
     'pytest >= 7.3.2, < 10',
+    'pytest-asyncio >= 0.24, < 2',
 ]
 
 [dependency-groups]
@@ -43,6 +44,7 @@ test = [
     "coverage>=7.4",
     "hypothesis>=6,<7",
     "pytest>=7.3.2,<10",
+    "pytest-asyncio>=0.24,<2",
     "time-machine>=2.16",
     "trio>=0.26",
 ]
@@ -285,6 +287,7 @@ extend-ignore = [
     "PLR2004", # magic-value-comparison
     "PLR6301", # no-self-use
     "PLW3201", # bad-dunder-method-name
+    "RUF029",  # unused-async: async tests/fixtures may only inspect loop state
     "S101",    # assert
     "S404",    # suspicious-subprocess-import
     "S603",    # subprocess-without-shell-equals-true

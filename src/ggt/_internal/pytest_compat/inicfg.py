@@ -40,6 +40,8 @@ _SUPPORTED = (
     "testpaths",
     "pythonpath",
     "usefixtures",
+    "asyncio_default_test_loop_scope",
+    "asyncio_default_fixture_loop_scope",
 )
 
 
@@ -51,6 +53,8 @@ class IniConfig:
     testpaths: tuple[str, ...] = ()
     pythonpath: tuple[str, ...] = ()
     usefixtures: tuple[str, ...] = ()
+    asyncio_default_test_loop_scope: str = ""
+    asyncio_default_fixture_loop_scope: str = ""
     addopts: tuple[str, ...] = ()
     # The directory containing the configuration file (or the initial
     # lookup directory when none was found).  Bounds the conftest.py
@@ -61,8 +65,19 @@ class IniConfig:
         result: dict[str, object] = {
             key: list(value)
             for key in _SUPPORTED
+            if key
+            not in {
+                "asyncio_default_test_loop_scope",
+                "asyncio_default_fixture_loop_scope",
+            }
             if (value := getattr(self, key))
         }
+        for key in (
+            "asyncio_default_test_loop_scope",
+            "asyncio_default_fixture_loop_scope",
+        ):
+            if value := getattr(self, key):
+                result[key] = value
         if self.rootdir:
             result["rootdir"] = self.rootdir
         return result
@@ -181,7 +196,21 @@ def _from_mapping(data: dict[str, object]) -> IniConfig:
     return IniConfig(
         rootdir=str(rootdir) if isinstance(rootdir, str) else "",
         addopts=_normalize_addopts(data.get("addopts")),
-        **{key: _normalize(data.get(key)) for key in _SUPPORTED},
+        asyncio_default_test_loop_scope=str(
+            data.get("asyncio_default_test_loop_scope") or ""
+        ),
+        asyncio_default_fixture_loop_scope=str(
+            data.get("asyncio_default_fixture_loop_scope") or ""
+        ),
+        **{
+            key: _normalize(data.get(key))
+            for key in _SUPPORTED
+            if key
+            not in {
+                "asyncio_default_test_loop_scope",
+                "asyncio_default_fixture_loop_scope",
+            }
+        },
     )
 
 

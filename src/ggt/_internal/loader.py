@@ -6,7 +6,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from typing_extensions import TypeAliasType
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import contextvars
 import heapq
@@ -28,7 +28,7 @@ from .pytest_compat import synth as _pytest_synth
 
 if TYPE_CHECKING:
     import types
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Iterable, Sequence
     from contextlib import AbstractContextManager
 
 
@@ -600,6 +600,30 @@ class TestCasePickleWrapper:
 
     def __reduce__(self) -> tuple[Any, ...]:
         return _reduce_TestCase(self._case)
+
+
+TestRecipe = tuple[
+    Callable[..., unittest.TestCase],
+    tuple[
+        _ImportLocation,
+        tuple[tuple[Any, ...], dict[str, Any]],
+        object | None,
+    ],
+]
+
+
+def snapshot_test_recipes(test: unittest.TestSuite) -> tuple[TestRecipe, ...]:
+    """Capture pristine reconstruction recipes without repeating collection."""
+    return tuple(
+        _reduce_TestCase(case)
+        for cases in get_test_cases([test]).values()
+        for case in cases
+    )
+
+
+def reconstruct_suite(recipes: Sequence[TestRecipe]) -> unittest.TestSuite:
+    """Build fresh TestCase instances from a post-collection snapshot."""
+    return unittest.TestSuite(restore(*args) for restore, args in recipes)
 
 
 def discover(

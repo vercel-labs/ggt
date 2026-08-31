@@ -840,6 +840,10 @@ def _run(
                     console.echo(str(test))
         return 0
 
+    # Repeat runs are fresh sessions, but collection and selection happen
+    # exactly once.  Snapshot before the first run can mutate TestCase state.
+    repeat_recipes = loader.snapshot_test_recipes(suite)
+
     jobs = max(min(total, jobs), 1)
 
     if ndjson is not None:
@@ -878,8 +882,11 @@ def _run(
             ndjson=ndjson,
         )
 
+        repeat_suite = (
+            suite if rnum == 0 else loader.reconstruct_suite(repeat_recipes)
+        )
         result = test_runner.run(
-            suite,
+            repeat_suite,
             selected_shard,
             total_shards,
             running_times_log_file,

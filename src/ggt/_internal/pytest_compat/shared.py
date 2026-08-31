@@ -40,7 +40,7 @@ import unittest
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from . import collect
+from . import collect, scoped_runner
 from . import fixtures as fixture_engine
 
 if TYPE_CHECKING:
@@ -77,7 +77,11 @@ class SharedFixtureAdapter:
         self._last_imported: object = None
 
     def _scope_key(self) -> object:
-        return self._mod.__name__ if self._fdef.scope == "module" else None
+        if self._fdef.scope == "module":
+            return self._mod.__name__
+        if self._fdef.scope == "package":
+            return scoped_runner.package_key(self._mod)
+        return None
 
     # -- the loader.Fixture protocol --------------------------------
 
@@ -131,6 +135,10 @@ class SharedFixtureAdapter:
             self._ran = False
             if self._fdef.scope == "module":
                 fixture_engine.teardown_module(self._mod.__name__)
+            elif self._fdef.scope == "package":
+                fixture_engine.teardown_package(
+                    scoped_runner.package_key(self._mod)
+                )
             else:
                 fixture_engine.teardown_session()
 
@@ -228,7 +236,7 @@ def _walk_shared_defs(
     # still execute in the parent while setting up a shared fixture that
     # depends on it. Iterate to a fixed point because a fixture definition
     # may have been reached earlier through a different root.
-    local = {fdef for fdef, _index in reached if fdef.local}
+    local = {fdef for fdef, _index in reached if fdef.local or fdef.is_async}
     while True:
         dependents = {
             fdef
@@ -244,7 +252,7 @@ def _walk_shared_defs(
         for fdef, _index in reached
         if (
             fdef not in local
-            and fdef.scope in {"session", "module"}
+            and fdef.scope in {"session", "package", "module"}
             and not fdef.needs_instance
             and not fdef.is_async
             and fdef.params is None
@@ -333,7 +341,12 @@ def attach_shared_fixtures(
     ]
 
     for fdef in sorted(reached, key=lambda d: (d.source, d.name)):
-        scope_key = mod.__name__ if fdef.scope == "module" else None
+        if fdef.scope == "module":
+            scope_key: str | None = mod.__name__
+        elif fdef.scope == "package":
+            scope_key = scoped_runner.package_key(mod)
+        else:
+            scope_key = None
         adapter = _adapters.get((fdef, scope_key))
         if adapter is None:
             adapter = SharedFixtureAdapter(fdef, mod)

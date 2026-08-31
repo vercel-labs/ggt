@@ -32,6 +32,7 @@ from . import (
     inicfg,
     marks,
     outcomes,
+    scoped_runner,
     shared,
 )
 from . import fixtures as fixture_engine
@@ -285,6 +286,24 @@ async def _run_async_body(
         await execution.run_async_finalizers()
 
 
+async def _run_async_test_body(
+    execution: fixture_engine.TestExecution,
+    fn: Callable[..., object],
+    kwargs: dict[str, object],
+    *,
+    setup: Callable[..., object] | None = None,
+    teardown: Callable[..., object] | None = None,
+    hook_arg: object = None,
+) -> None:
+    if setup is not None:
+        _call_with_optional_arg(setup, hook_arg)
+    try:
+        await _call_async_test(fn, kwargs)
+    finally:
+        if teardown is not None:
+            _call_with_optional_arg(teardown, hook_arg)
+
+
 def _make_function_method(
     func: types.FunctionType,
     owner_name: str,
@@ -325,10 +344,10 @@ def _make_function_method(
                 )
 
         method = anyio_method
-    elif inspect.iscoroutinefunction(func):
+    elif _is_async_test(func) and not anyio_bridge.has_anyio_mark(exec_marks):
 
         @functools.wraps(func)
-        async def async_method(self: unittest.TestCase) -> None:
+        def async_method(self: unittest.TestCase) -> None:
             with fixture_engine.test_execution(
                 mod=mod,
                 synth_cls=type(self),
@@ -336,13 +355,32 @@ def _make_function_method(
                 param_bindings=param_bindings,
                 item_marks=exec_marks,
             ) as execution:
-                await _run_async_body(
-                    execution,
-                    func,
-                    params=params,
-                    usefixtures=usefixtures,
-                    argnames=argnames,
+                kwargs = execution.prepare_async(
+                    usefixtures=usefixtures, argnames=argnames, params=params
                 )
+                loop_scope = scoped_runner.test_loop_scope(
+                    exec_marks, source=f"{mod.__name__}::{func.__name__}"
+                )
+                loop_key = execution.scope_key(loop_scope)
+                if hypothesis_bridge.async_inner(func) is not None:
+                    with hypothesis_bridge.runner_context(
+                        functools.partial(
+                            scoped_runner.run, loop_scope, loop_key
+                        )
+                    ):
+                        _call_sync_test(
+                            execution,
+                            func,
+                            kwargs,
+                            params=params,
+                            use_anyio=False,
+                        )
+                else:
+                    scoped_runner.run(
+                        loop_scope,
+                        loop_key,
+                        _run_async_test_body(execution, func, kwargs),
+                    )
 
         method = async_method
     else:
@@ -356,11 +394,9 @@ def _make_function_method(
                 param_bindings=param_bindings,
                 item_marks=exec_marks,
             ) as execution:
-                execution.resolve_autouse()
-                for fixture_name in usefixtures:
-                    execution.get(fixture_name)
-                kwargs: dict[str, object] = {**params}
-                kwargs.update((name, execution.get(name)) for name in argnames)
+                kwargs = execution.prepare_async(
+                    usefixtures=usefixtures, argnames=argnames, params=params
+                )
                 _call_sync_test(
                     execution,
                     func,
@@ -426,10 +462,12 @@ def _make_class_method(
                 )
 
         method = anyio_class_method
-    elif inspect.iscoroutinefunction(orig_func):
+    elif _is_async_test(orig_func) and not anyio_bridge.has_anyio_mark(
+        exec_marks
+    ):
 
         @functools.wraps(orig_func)
-        async def async_method(self: unittest.TestCase) -> None:
+        def async_method(self: unittest.TestCase) -> None:
             # pytest instantiates the test class once per test method.
             instance = orig_cls()
 
@@ -442,16 +480,51 @@ def _make_class_method(
                 param_bindings=param_bindings,
                 item_marks=exec_marks,
             ) as execution:
-                await _run_async_body(
-                    execution,
-                    getattr(instance, meth_name),
-                    params=params,
-                    usefixtures=usefixtures,
-                    argnames=argnames,
-                    setup=getattr(instance, "setup_method", None),
-                    teardown=getattr(instance, "teardown_method", None),
-                    hook_arg=orig_func,
+                kwargs = execution.prepare_async(
+                    usefixtures=usefixtures, argnames=argnames, params=params
                 )
+                loop_scope = scoped_runner.test_loop_scope(
+                    exec_marks,
+                    source=f"{mod.__name__}::{orig_cls.__name__}::{meth_name}",
+                )
+                loop_key = execution.scope_key(loop_scope)
+                bound = getattr(instance, meth_name)
+                if hypothesis_bridge.async_inner(orig_func) is not None:
+                    setup = getattr(instance, "setup_method", None)
+                    if setup is not None:
+                        _call_with_optional_arg(setup, orig_func)
+                    try:
+                        with hypothesis_bridge.runner_context(
+                            functools.partial(
+                                scoped_runner.run, loop_scope, loop_key
+                            )
+                        ):
+                            _call_sync_test(
+                                execution,
+                                bound,
+                                kwargs,
+                                params=params,
+                                use_anyio=False,
+                            )
+                    finally:
+                        teardown = getattr(instance, "teardown_method", None)
+                        if teardown is not None:
+                            _call_with_optional_arg(teardown, orig_func)
+                else:
+                    scoped_runner.run(
+                        loop_scope,
+                        loop_key,
+                        _run_async_test_body(
+                            execution,
+                            bound,
+                            kwargs,
+                            setup=getattr(instance, "setup_method", None),
+                            teardown=getattr(
+                                instance, "teardown_method", None
+                            ),
+                            hook_arg=orig_func,
+                        ),
+                    )
 
         method = async_method
     else:
@@ -470,11 +543,9 @@ def _make_class_method(
                 param_bindings=param_bindings,
                 item_marks=exec_marks,
             ) as execution:
-                execution.resolve_autouse()
-                for fixture_name in usefixtures:
-                    execution.get(fixture_name)
-                kwargs: dict[str, object] = {**params}
-                kwargs.update((name, execution.get(name)) for name in argnames)
+                kwargs = execution.prepare_async(
+                    usefixtures=usefixtures, argnames=argnames, params=params
+                )
 
                 setup = getattr(instance, "setup_method", None)
                 if setup is not None:
@@ -737,6 +808,32 @@ def _expand_test_item(
         # entirely, hence the exclusion.
         roots.append(("anyio_backend", 0))
     fixture_cases = _fixture_param_cases(registry, roots)
+    affinity_scopes: list[str] = []
+    if is_async and not anyio_bridge.has_anyio_mark(item_marks):
+        affinity_scopes.append(
+            scoped_runner.test_loop_scope(
+                item_marks, source=f"{mod.__name__}::{base_name}"
+            )
+        )
+    for fdef, _index in fixture_engine.walk_fixture_defs(registry, roots):
+        if fdef.is_async:
+            affinity_scopes.append(
+                scoped_runner.fixture_loop_scope(
+                    fdef.loop_scope,
+                    cache_scope=fdef.scope,
+                    source=f"fixture {fdef.name!r} in {fdef.source}",
+                )
+            )
+    local_affinities = [
+        scope
+        for scope in affinity_scopes
+        if scope in {"class", "module", "package"}
+    ]
+    affinity_scope = max(
+        local_affinities,
+        key=scoped_runner.SCOPES.index,
+        default="function",
+    )
 
     plain = mark_cases is None and fixture_cases is None
 
@@ -797,6 +894,17 @@ def _expand_test_item(
                 if isinstance(getattr(mark, "name", None), str)
             )
             setattr(method, ggt_marks.MARKS_ATTR, mark_names)
+            if affinity_scope in {"class", "module", "package"}:
+                if affinity_scope == "class":
+                    affinity_key = None
+                elif affinity_scope == "module":
+                    affinity_key = mod.__name__
+                else:
+                    affinity_key = scoped_runner.package_key(mod)
+                method.__ggt_async_affinity__ = (  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+                    affinity_scope,
+                    affinity_key,
+                )
             methods[name] = method
 
 
@@ -868,8 +976,6 @@ def _base_for(methods: Mapping[str, Any]) -> type[unittest.TestCase]:
     their own backend loop via anyio.run), so they do not force the
     async base.
     """
-    if any(inspect.iscoroutinefunction(method) for method in methods.values()):
-        return unittest.IsolatedAsyncioTestCase
     return unittest.TestCase
 
 
