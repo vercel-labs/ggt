@@ -26,6 +26,7 @@ off, so library consumers of the suite classes are unaffected.
 from __future__ import annotations
 
 import contextlib
+import errno
 import faulthandler
 import os
 import sys
@@ -48,6 +49,23 @@ class OutputCapture:
     """Redirects fds 1 and 2 to temp files for the duration of a test."""
 
     def __init__(self) -> None:
+        # Spawned workers may have no stdout/stderr descriptor (notably
+        # on Windows). Reserve both slots before duplicating either one:
+        # otherwise dup(1) can take slot 2 and alias the two streams.
+        self._missing_fds: list[int] = []
+        for fd in _STD_FDS:
+            try:
+                os.fstat(fd)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+                self._missing_fds.append(fd)
+                null_fd = os.open(os.devnull, os.O_RDWR)
+                if null_fd != fd:
+                    try:
+                        os.dup2(null_fd, fd)
+                    finally:
+                        os.close(null_fd)
         self._saved_fds = [os.dup(fd) for fd in _STD_FDS]
         for fd in self._saved_fds:
             os.set_inheritable(fd, False)  # noqa: FBT003
@@ -87,6 +105,10 @@ class OutputCapture:
             with contextlib.suppress(OSError):
                 os.close(fd)
         self._saved_fds = []
+        for fd in self._missing_fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        self._missing_fds = []
 
     def start(self) -> None:
         assert not self._active
