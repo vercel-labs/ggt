@@ -1622,6 +1622,66 @@ def test_installed_plugin_fixture(installed_plugin_value):
                 self.assertIn("Captured stderr:", result.output)
                 self.assertIn("NOISY-FAIL-STDERR-MARKER", result.output)
 
+    async def test_output_capture_with_missing_standard_descriptors(
+        self,
+    ) -> None:
+        # Isolate descriptor changes from the runner executing this test.
+        script = """
+import faulthandler
+import json
+import os
+import pathlib
+import sys
+from ggt._internal.capture import OutputCapture
+
+missing = json.loads(sys.argv[1])
+result_path = pathlib.Path(sys.argv[2])
+faulthandler.disable()
+for fd in missing:
+    os.close(fd)
+
+captures = []
+for _ in range(2):
+    capture = OutputCapture()
+    try:
+        capture.start()
+        os.write(1, b"stdout marker")
+        os.write(2, b"stderr marker")
+        with capture.suspended():
+            os.write(1, b"outside capture")
+            os.write(2, b"outside capture")
+        captures.append(capture.stop())
+    finally:
+        capture.close()
+    for fd in (1, 2):
+        try:
+            os.fstat(fd)
+        except OSError:
+            assert fd in missing
+        else:
+            assert fd not in missing
+result_path.write_text(json.dumps(captures), encoding="utf-8")
+"""
+        for missing in ([1], [2], [1, 2]):
+            with self.subTest(missing=missing):
+                result_path = self.project / "captured.json"
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    script,
+                    json.dumps(missing),
+                    str(result_path),
+                    env=self.env(),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                self.assertEqual(proc.returncode, 0, (stdout, stderr))
+                self.assertEqual(
+                    json.loads(result_path.read_text(encoding="utf-8")),
+                    [["stdout marker", "stderr marker"]] * 2,
+                )
+
     async def test_output_capture_disabled(self) -> None:
         self.use_fixture("noisy")
         result = await self.run_ggt(
